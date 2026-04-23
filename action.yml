@@ -14,9 +14,8 @@ inputs:
     required: false
     default: 'https://api.openai.com/v1'
   llm_model:
-    description: 'Model identifier to pass in the chat-completion request.'
+    description: 'Model identifier to pass in the chat-completion request. If omitted, the action auto-discovers the first model from {llm_api_base}/models.'
     required: false
-    default: 'gpt-4o'
   mention_trigger:
     description: 'Phrase that must appear in a comment to trigger a review.'
     required: false

@@ -152,7 +152,6 @@ jobs:
         with:
           llm_api_key: ${{ secrets.LLM_API_KEY }}
           llm_api_base: https://api.openai.com/v1
-          llm_model: gpt-4o
 ```
 
 Pin to a commit SHA (`tarekziade/ai-reviewer@<sha>`) or a tag once
@@ -178,7 +177,7 @@ repository secret:
 | ----------------------- | --------------------------------------------- | -------- |
 | `llm_api_key`           | —                                             | ✅       |
 | `llm_api_base`          | `https://api.openai.com/v1`                   |          |
-| `llm_model`             | `gpt-4o`                                      |          |
+| `llm_model`             | first `id` from `{llm_api_base}/models`       |          |
 | `mention_trigger`       | `@claude`                                     |          |
 | `review_event`          | `COMMENT`                                     |          |
 | `max_diff_chars`        | `200000`                                      |          |
@@ -248,10 +247,9 @@ Required variables:
 | `GITHUB_WEBHOOK_SECRET` | Shared secret set in the App's webhook config  |
 | `LLM_API_BASE`          | Base URL of an OpenAI-compatible endpoint      |
 | `LLM_API_KEY`           | Bearer token for that endpoint                 |
-| `LLM_MODEL`             | Model identifier, e.g. `gpt-4o`                |
 
 Optional variables (same defaults as the Action inputs above):
-`MENTION_TRIGGER`, `REVIEW_EVENT`, `MAX_DIFF_CHARS`,
+`LLM_MODEL`, `MENTION_TRIGGER`, `REVIEW_EVENT`, `MAX_DIFF_CHARS`,
 `REVIEW_RULES_PATH`, `DEFAULT_REVIEW_RULES`, `PORT`, `LOG_LEVEL`.
 
 ### 3. Run
@@ -320,6 +318,10 @@ will work. Example bases:
 - Hugging Face Router: `https://router.huggingface.co/v1`
 - Anthropic OpenAI shim: `https://api.anthropic.com/v1`
 - vLLM / TGI / llama.cpp / LM Studio: whatever `/v1` they expose
+
+If `llm_model` / `LLM_MODEL` is omitted, the reviewer calls
+`{LLM_API_BASE}/models` and uses the first returned `data[].id`. This
+matches LoopSleuth's endpoint-discovery behavior.
 
 If your endpoint ignores `response_format=json_object`, the reviewer
 still recovers: it extracts fenced or bare JSON blocks from the

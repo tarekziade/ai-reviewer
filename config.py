@@ -24,7 +24,7 @@ class Config:
 
     llm_api_base: str
     llm_api_key: str
-    llm_model: str
+    llm_model: Optional[str]
 
     mention_trigger: str
     review_event: str
@@ -59,7 +59,7 @@ class Config:
             github_webhook_secret=webhook_secret,
             llm_api_base=os.environ.get("LLM_API_BASE", "https://api.openai.com/v1").rstrip("/"),
             llm_api_key=os.environ["LLM_API_KEY"],
-            llm_model=os.environ.get("LLM_MODEL", "gpt-4o"),
+            llm_model=os.environ.get("LLM_MODEL") or None,
             mention_trigger=os.environ.get("MENTION_TRIGGER", "@claude"),
             review_event=os.environ.get("REVIEW_EVENT", "COMMENT"),
             max_diff_chars=int(os.environ.get("MAX_DIFF_CHARS", "200000")),
