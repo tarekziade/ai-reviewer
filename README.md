@@ -151,7 +151,7 @@ jobs:
       - uses: tarekziade/ai-reviewer@main
         with:
           llm_api_key: ${{ secrets.LLM_API_KEY }}
-          llm_api_base: https://api.openai.com/v1
+          llm_api_base: ${{ secrets.LLM_API_BASE || 'https://api.openai.com/v1' }}
 ```
 
 Pin to a commit SHA (`tarekziade/ai-reviewer@<sha>`) or a tag once
@@ -165,11 +165,15 @@ triggering comment and posts fallback/error comments on the PR when it
 cannot produce a review.
 
 Before the workflow can run you need to add the LLM credential as a
-repository secret:
+repository secret. If you do not want to hardcode the endpoint URL in
+the workflow YAML, store that as a secret too:
 
 - **Settings → Secrets and variables → Actions → New repository secret**
 - Name: `LLM_API_KEY`
 - Value: your OpenAI / Anthropic / HF Router / … bearer token
+- Optional Name: `LLM_API_BASE`
+- Optional Value: your endpoint base URL, for example
+  `https://router.huggingface.co` or `https://router.huggingface.co/v1`
 
 ### Action inputs
 
