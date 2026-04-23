@@ -128,7 +128,7 @@ on:
 permissions:
   contents: read
   pull-requests: write
-  issues: read
+  issues: write
 
 jobs:
   review:
@@ -160,6 +160,10 @@ you're happy with a version, rather than tracking `main`.
 
 The workflow-level `if:` is redundant with the in-process trigger
 gating but filters early so nothing spins up for irrelevant events.
+
+`issues: write` is needed because the reviewer adds reactions to the
+triggering comment and posts fallback/error comments on the PR when it
+cannot produce a review.
 
 Before the workflow can run you need to add the LLM credential as a
 repository secret:
