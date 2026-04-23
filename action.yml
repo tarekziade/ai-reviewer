@@ -1,0 +1,75 @@
+name: 'AI Reviewer'
+description: 'Review pull requests with any OpenAI-compatible LLM and post inline comments on the diff.'
+author: 'ai-reviewer'
+branding:
+  icon: 'message-square'
+  color: 'purple'
+
+inputs:
+  llm_api_key:
+    description: 'Bearer token for the chat-completion endpoint.'
+    required: true
+  llm_api_base:
+    description: 'Base URL of an OpenAI-compatible /v1/chat/completions endpoint.'
+    required: false
+    default: 'https://api.openai.com/v1'
+  llm_model:
+    description: 'Model identifier to pass in the chat-completion request.'
+    required: false
+    default: 'gpt-4o'
+  mention_trigger:
+    description: 'Phrase that must appear in a comment to trigger a review.'
+    required: false
+    default: '@claude'
+  review_event:
+    description: 'One of COMMENT, REQUEST_CHANGES, APPROVE (fallback if the LLM omits one).'
+    required: false
+    default: 'COMMENT'
+  max_diff_chars:
+    description: 'Maximum diff size (characters) sent to the LLM.'
+    required: false
+    default: '200000'
+  review_rules_path:
+    description: 'Path to repo-specific review rules, read from the default branch.'
+    required: false
+    default: '.ai/review-rules.md'
+  default_review_rules:
+    description: 'Fallback rules used when the repo has no review-rules file.'
+    required: false
+    default: 'Apply general Python correctness and security standards.'
+  github_token:
+    description: 'Token with pull-requests:write. Defaults to the job token.'
+    required: false
+    default: ${{ github.token }}
+  python_version:
+    description: 'Python version to set up for running the reviewer.'
+    required: false
+    default: '3.12'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python_version }}
+        cache: 'pip'
+        cache-dependency-path: ${{ github.action_path }}/requirements.txt
+
+    - name: Install dependencies
+      shell: bash
+      run: pip install --disable-pip-version-check -r "${{ github.action_path }}/requirements.txt"
+
+    - name: Run AI reviewer
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github_token }}
+        LLM_API_BASE: ${{ inputs.llm_api_base }}
+        LLM_API_KEY: ${{ inputs.llm_api_key }}
+        LLM_MODEL: ${{ inputs.llm_model }}
+        MENTION_TRIGGER: ${{ inputs.mention_trigger }}
+        REVIEW_EVENT: ${{ inputs.review_event }}
+        MAX_DIFF_CHARS: ${{ inputs.max_diff_chars }}
+        REVIEW_RULES_PATH: ${{ inputs.review_rules_path }}
+        DEFAULT_REVIEW_RULES: ${{ inputs.default_review_rules }}
+      run: python "${{ github.action_path }}/action_runner.py"
