@@ -20,6 +20,11 @@ class ChatCompletionClient:
         self.api_key = api_key
         self.model = model
 
+    def _api_base_v1(self) -> str:
+        if self.api_base.endswith("/v1"):
+            return self.api_base
+        return f"{self.api_base}/v1"
+
     def _headers(self) -> dict[str, str]:
         return {
             "Authorization": f"Bearer {self.api_key}",
@@ -27,7 +32,7 @@ class ChatCompletionClient:
         }
 
     def _discover_model(self) -> str:
-        models_url = f"{self.api_base}/models"
+        models_url = f"{self._api_base_v1()}/models"
         response = requests.get(
             models_url,
             headers=self._headers(),
@@ -80,7 +85,7 @@ class ChatCompletionClient:
             payload.update(extra)
 
         r = requests.post(
-            f"{self.api_base}/chat/completions",
+            f"{self._api_base_v1()}/chat/completions",
             headers=self._headers(),
             data=json.dumps(payload),
             timeout=300,

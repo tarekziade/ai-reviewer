@@ -3,7 +3,7 @@
 **Source:** [github.com/tarekziade/ai-reviewer](https://github.com/tarekziade/ai-reviewer)
 
 Reviews pull requests with any **OpenAI-compatible chat-completion
-endpoint** and posts **inline comments** on the diff via GitHub's
+service** and posts **inline comments** on the diff via GitHub's
 Pull Request Reviews API.
 
 Reimplements the
@@ -245,7 +245,7 @@ Required variables:
 | `GITHUB_APP_ID`         | Numeric ID of the GitHub App                   |
 | `GITHUB_PRIVATE_KEY_PATH` or `GITHUB_PRIVATE_KEY` | PEM private key (path or inline) |
 | `GITHUB_WEBHOOK_SECRET` | Shared secret set in the App's webhook config  |
-| `LLM_API_BASE`          | Base URL of an OpenAI-compatible endpoint      |
+| `LLM_API_BASE`          | Base URL of an OpenAI-compatible service (`...` or `.../v1`) |
 | `LLM_API_KEY`           | Bearer token for that endpoint                 |
 
 Optional variables (same defaults as the Action inputs above):
@@ -306,21 +306,25 @@ you're reviewing enough PRs that Actions minutes or queue time hurt.
 Any server that accepts
 
 ```http
-POST {LLM_API_BASE}/chat/completions
+POST {normalized(LLM_API_BASE)}/chat/completions
 Authorization: Bearer {LLM_API_KEY}
 
 {"model": "...", "messages": [...], "response_format": {"type": "json_object"}}
 ```
 
+where `normalized(LLM_API_BASE)` means `LLM_API_BASE` itself when it
+already ends in `/v1`, otherwise `LLM_API_BASE + "/v1"`,
+
 will work. Example bases:
 
-- OpenAI: `https://api.openai.com/v1`
-- Hugging Face Router: `https://router.huggingface.co/v1`
-- Anthropic OpenAI shim: `https://api.anthropic.com/v1`
-- vLLM / TGI / llama.cpp / LM Studio: whatever `/v1` they expose
+- OpenAI: `https://api.openai.com` or `https://api.openai.com/v1`
+- Hugging Face Router: `https://router.huggingface.co` or `https://router.huggingface.co/v1`
+- Anthropic OpenAI shim: `https://api.anthropic.com` or `https://api.anthropic.com/v1`
+- vLLM / TGI / llama.cpp / LM Studio: the service root or its `/v1` URL
 
 If `llm_model` / `LLM_MODEL` is omitted, the reviewer calls
-`{LLM_API_BASE}/models` and uses the first returned `data[].id`. This
+`{LLM_API_BASE}/v1/models` and uses the first returned `data[].id`
+(or `{LLM_API_BASE}/models` when the base already ends in `/v1`). This
 matches LoopSleuth's endpoint-discovery behavior.
 
 If your endpoint ignores `response_format=json_object`, the reviewer

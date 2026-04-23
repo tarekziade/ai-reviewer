@@ -10,7 +10,7 @@ inputs:
     description: 'Bearer token for the chat-completion endpoint.'
     required: true
   llm_api_base:
-    description: 'Base URL of an OpenAI-compatible /v1/chat/completions endpoint.'
+    description: 'Base URL of an OpenAI-compatible service. Accepts either https://host or https://host/v1.'
     required: false
     default: 'https://api.openai.com/v1'
   llm_model:
