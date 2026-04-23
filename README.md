@@ -1,5 +1,7 @@
 # ai-reviewer
 
+**Source:** [github.com/tarekziade/ai-reviewer](https://github.com/tarekziade/ai-reviewer)
+
 Reviews pull requests with any **OpenAI-compatible chat-completion
 endpoint** and posts **inline comments** on the diff via GitHub's
 Pull Request Reviews API.
@@ -110,12 +112,9 @@ with the job's `GITHUB_TOKEN`. No public server, no App registration.
 
 ### Setup
 
-1. **Vendor this repo** into the target repository (e.g. as a git
-   submodule at `.github/actions/ai-reviewer`) or push it to a repo of
-   its own and reference it by tag.
-
-2. **Add a workflow** in the target repo, e.g.
-   `.github/workflows/ai-review.yml`:
+Drop this workflow into the repository you want reviewed as
+`.github/workflows/ai-review.yml`. The action is referenced directly
+from `tarekziade/ai-reviewer` — no vendoring, no submodules.
 
 ```yaml
 name: AI PR Review
@@ -149,20 +148,25 @@ jobs:
         github.event.comment.author_association == 'COLLABORATOR'))
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-        with:
-          repository: <your-org>/ai-reviewer
-          path: .github/actions/ai-reviewer
-
-      - uses: ./.github/actions/ai-reviewer
+      - uses: tarekziade/ai-reviewer@main
         with:
           llm_api_key: ${{ secrets.LLM_API_KEY }}
           llm_api_base: https://api.openai.com/v1
           llm_model: gpt-4o
 ```
 
+Pin to a commit SHA (`tarekziade/ai-reviewer@<sha>`) or a tag once
+you're happy with a version, rather than tracking `main`.
+
 The workflow-level `if:` is redundant with the in-process trigger
 gating but filters early so nothing spins up for irrelevant events.
+
+Before the workflow can run you need to add the LLM credential as a
+repository secret:
+
+- **Settings → Secrets and variables → Actions → New repository secret**
+- Name: `LLM_API_KEY`
+- Value: your OpenAI / Anthropic / HF Router / … bearer token
 
 ### Action inputs
 
@@ -221,7 +225,8 @@ install the App on the repositories you want reviewed.
 ### 2. Configure
 
 ```bash
-git clone <this-repo> && cd ai-reviewer
+git clone https://github.com/tarekziade/ai-reviewer.git
+cd ai-reviewer
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
