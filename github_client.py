@@ -82,7 +82,11 @@ class GitHubClient:
             json=payload,
             timeout=60,
         )
-        r.raise_for_status()
+        if not r.ok:
+            raise requests.HTTPError(
+                f"{r.status_code} creating review on {owner}/{repo}#{number}: {r.text}",
+                response=r,
+            )
         return r.json()
 
     def post_issue_comment(self, owner: str, repo: str, number: int, body: str) -> dict:
