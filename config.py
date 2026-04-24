@@ -31,6 +31,7 @@ class Config:
     max_diff_chars: int
     review_rules_path: str
     default_review_rules: str
+    allow_approve: bool
 
     @classmethod
     def from_env(cls, *, require_app: bool = True) -> "Config":
@@ -68,4 +69,5 @@ class Config:
                 "DEFAULT_REVIEW_RULES",
                 "Apply general Python correctness and security standards.",
             ),
+            allow_approve=os.environ.get("ALLOW_APPROVE", "").lower() in ("1", "true", "yes"),
         )

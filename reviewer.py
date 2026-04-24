@@ -156,6 +156,10 @@ def run_review(cfg: Config, gh: GitHubClient, req: ReviewRequest) -> None:
     if event not in ("COMMENT", "REQUEST_CHANGES", "APPROVE"):
         event = cfg.review_event
 
+    if event == "APPROVE" and not cfg.allow_approve:
+        log.info("Downgrading APPROVE to COMMENT (Actions tokens cannot approve; set ALLOW_APPROVE=1 in App mode to permit)")
+        event = "COMMENT"
+
     valid, rejected = _validate_comments(result.get("comments") or [], parsed_by_path)
     if rejected:
         log.warning("Dropped %d invalid comment(s): %s", len(rejected), rejected)
