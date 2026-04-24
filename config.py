@@ -32,6 +32,7 @@ class Config:
     review_rules_path: str
     default_review_rules: str
     allow_approve: bool
+    persona_header: str
 
     @classmethod
     def from_env(cls, *, require_app: bool = True) -> "Config":
@@ -70,4 +71,5 @@ class Config:
                 "Apply general Python correctness and security standards.",
             ),
             allow_approve=os.environ.get("ALLOW_APPROVE", "").lower() in ("1", "true", "yes"),
+            persona_header=os.environ.get("PERSONA_HEADER", "🤗 **Serge** says:"),
         )

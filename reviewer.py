@@ -167,6 +167,8 @@ def run_review(cfg: Config, gh: GitHubClient, req: ReviewRequest) -> None:
     # GitHub requires a body when there are no inline comments and the event is
     # not APPROVE; also REQUEST_CHANGES requires at least one comment or a body.
     body = summary or "(no overall summary provided)"
+    if cfg.persona_header:
+        body = f"{cfg.persona_header}\n\n{body}"
     if rejected:
         body += f"\n\n_Note: {len(rejected)} suggested inline comment(s) were dropped because they referenced lines not present in the diff._"
 
