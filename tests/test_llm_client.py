@@ -1,6 +1,13 @@
 import json
+import sys
+import types
 import unittest
 from unittest.mock import Mock, patch
+
+requests_stub = types.ModuleType("requests")
+requests_stub.get = lambda *args, **kwargs: None
+requests_stub.post = lambda *args, **kwargs: None
+sys.modules.setdefault("requests", requests_stub)
 
 from llm_client import ChatCompletionClient
 

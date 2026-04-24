@@ -60,7 +60,7 @@ class Config:
             llm_api_base=os.environ.get("LLM_API_BASE", "https://api.openai.com/v1").rstrip("/"),
             llm_api_key=os.environ["LLM_API_KEY"],
             llm_model=os.environ.get("LLM_MODEL") or None,
-            mention_trigger=os.environ.get("MENTION_TRIGGER", "@claude"),
+            mention_trigger=os.environ.get("MENTION_TRIGGER", "@serge"),
             review_event=os.environ.get("REVIEW_EVENT", "COMMENT"),
             max_diff_chars=int(os.environ.get("MAX_DIFF_CHARS", "200000")),
             review_rules_path=os.environ.get("REVIEW_RULES_PATH", ".ai/review-rules.md"),
