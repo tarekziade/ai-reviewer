@@ -50,7 +50,18 @@ def main() -> int:
         return 0
 
     gh = GitHubClient(token)
-    run_review(cfg, gh, req)
+    try:
+        run_review(cfg, gh, req)
+    except Exception as exc:
+        log.exception("review failed")
+        body = f"⚠️ Review failed: `{type(exc).__name__}: {exc}`"
+        if cfg.persona_header:
+            body = f"{cfg.persona_header}\n\n{body}"
+        try:
+            gh.post_issue_comment(req.owner, req.repo, req.number, body)
+        except Exception:
+            log.exception("failed to post failure comment to PR")
+        return 1
     return 0
 
 

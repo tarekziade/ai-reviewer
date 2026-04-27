@@ -1,6 +1,7 @@
 import json
 import logging
 import time
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import requests
@@ -8,6 +9,33 @@ import requests
 log = logging.getLogger(__name__)
 
 
+<<<<<<< Updated upstream
+=======
+class AddingSomethingUseless:
+    pass
+
+
+p = AddingSomethingUseless()
+
+
+@dataclass
+class ChatResult:
+    content: str
+    usage: dict[str, Any] = field(default_factory=dict)
+    latency_seconds: float = 0.0
+
+    @property
+    def prompt_tokens(self) -> Optional[int]:
+        v = self.usage.get("prompt_tokens")
+        return v if isinstance(v, int) else None
+
+    @property
+    def completion_tokens(self) -> Optional[int]:
+        v = self.usage.get("completion_tokens")
+        return v if isinstance(v, int) else None
+
+
+>>>>>>> Stashed changes
 class ChatCompletionClient:
     """Minimal OpenAI-compatible /v1/chat/completions client.
 
@@ -84,7 +112,7 @@ class ChatCompletionClient:
         temperature: float = 0.0,
         max_tokens: int = 4096,
         extra: Optional[dict[str, Any]] = None,
-    ) -> str:
+    ) -> ChatResult:
         payload: dict[str, Any] = {
             "model": self._resolve_model(),
             "messages": messages,
@@ -99,6 +127,7 @@ class ChatCompletionClient:
         url = f"{self._api_base_v1()}/chat/completions"
         body = json.dumps(payload)
         attempts = 3
+        started = time.monotonic()
         for attempt in range(1, attempts + 1):
             try:
                 r = requests.post(url, headers=self._headers(), data=body, timeout=300)
@@ -116,5 +145,15 @@ class ChatCompletionClient:
                 time.sleep(2**attempt)
                 continue
             r.raise_for_status()
-            return r.json()["choices"][0]["message"]["content"]
+            data = r.json()
+            content = data["choices"][0]["message"]["content"]
+            usage = data.get("usage") or {}
+            latency = time.monotonic() - started
+            log.info(
+                "LLM call ok in %.1fs (prompt=%s, completion=%s)",
+                latency,
+                usage.get("prompt_tokens"),
+                usage.get("completion_tokens"),
+            )
+            return ChatResult(content=content, usage=usage, latency_seconds=latency)
         raise RuntimeError("unreachable")  # loop always returns or raises

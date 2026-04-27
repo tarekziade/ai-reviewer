@@ -24,9 +24,9 @@ class ChatCompletionClientTests(unittest.TestCase):
             )
 
             client = ChatCompletionClient("https://example.com/v1", "token", "fixed-model")
-            content = client.complete([{"role": "user", "content": "hi"}])
+            result = client.complete([{"role": "user", "content": "hi"}])
 
-        self.assertEqual(content, "ok")
+        self.assertEqual(result.content, "ok")
         mock_get.assert_not_called()
         payload = json.loads(mock_post.call_args.kwargs["data"])
         self.assertEqual(payload["model"], "fixed-model")
@@ -50,8 +50,8 @@ class ChatCompletionClientTests(unittest.TestCase):
             first = client.complete([{"role": "user", "content": "one"}])
             second = client.complete([{"role": "user", "content": "two"}])
 
-        self.assertEqual(first, "ok")
-        self.assertEqual(second, "ok")
+        self.assertEqual(first.content, "ok")
+        self.assertEqual(second.content, "ok")
         mock_get.assert_called_once_with(
             "https://example.com/v1/models",
             headers={
@@ -81,9 +81,9 @@ class ChatCompletionClientTests(unittest.TestCase):
             )
 
             client = ChatCompletionClient("https://example.com", "token")
-            content = client.complete([{"role": "user", "content": "hi"}])
+            result = client.complete([{"role": "user", "content": "hi"}])
 
-        self.assertEqual(content, "ok")
+        self.assertEqual(result.content, "ok")
         mock_get.assert_called_once_with(
             "https://example.com/v1/models",
             headers={
@@ -149,9 +149,9 @@ class ChatCompletionClientTests(unittest.TestCase):
             "llm_client.requests.post", side_effect=[flaky, ok]
         ) as mock_post:
             client = ChatCompletionClient("https://example.com/v1", "token", "fixed-model")
-            content = client.complete([{"role": "user", "content": "hi"}])
+            result = client.complete([{"role": "user", "content": "hi"}])
 
-        self.assertEqual(content, "ok")
+        self.assertEqual(result.content, "ok")
         self.assertEqual(mock_post.call_count, 2)
 
     def test_complete_raises_when_discovery_returns_no_models(self) -> None:

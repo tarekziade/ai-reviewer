@@ -6,7 +6,7 @@ from typing import Any
 
 from config import Config
 from github_client import GitHubClient
-from llm_client import ChatCompletionClient
+from llm_client import ChatCompletionClient, ChatResult
 from patch import ParsedFile, parse_patch
 from prompts import build_system_prompt, build_user_prompt
 
@@ -102,6 +102,15 @@ def _validate_comments(
     return valid, rejected
 
 
+def _format_metrics(chat: ChatResult) -> str:
+    parts = [f"{chat.latency_seconds:.1f}s"]
+    if chat.prompt_tokens is not None or chat.completion_tokens is not None:
+        parts.append(
+            f"{chat.prompt_tokens or '?'} in / {chat.completion_tokens or '?'} out tokens"
+        )
+    return " · ".join(parts)
+
+
 def _load_review_rules(gh: GitHubClient, owner: str, repo: str, pr: dict, cfg: Config) -> str:
     default_branch = pr.get("base", {}).get("repo", {}).get("default_branch") or "main"
     try:
@@ -165,7 +174,7 @@ def run_review(cfg: Config, gh: GitHubClient, req: ReviewRequest) -> None:
         diff=diff_text,
     )
 
-    raw = llm.complete(
+    chat = llm.complete(
         [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
@@ -173,16 +182,17 @@ def run_review(cfg: Config, gh: GitHubClient, req: ReviewRequest) -> None:
         response_format={"type": "json_object"},
         max_tokens=cfg.llm_max_tokens,
     )
+    metrics_line = _format_metrics(chat)
 
     try:
-        result = _extract_json(raw)
+        result = _extract_json(chat.content)
     except Exception:
         log.exception("could not parse LLM output as JSON")
         gh.post_issue_comment(
             req.owner,
             req.repo,
             req.number,
-            f"Reviewer LLM returned unparseable output:\n\n```\n{raw[:3000]}\n```",
+            f"Reviewer LLM returned unparseable output ({metrics_line}):\n\n```\n{chat.content[:3000]}\n```",
         )
         return
 
@@ -206,6 +216,7 @@ def run_review(cfg: Config, gh: GitHubClient, req: ReviewRequest) -> None:
         body = f"{cfg.persona_header}\n\n{body}"
     if rejected:
         body += f"\n\n_Note: {len(rejected)} suggested inline comment(s) were dropped because they referenced lines not present in the diff._"
+    body += f"\n\n_{metrics_line}_"
 
     head_sha = (pr.get("head") or {}).get("sha")
     if not head_sha:
