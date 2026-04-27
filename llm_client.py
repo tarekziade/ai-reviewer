@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 from typing import Any, Optional
 
 import requests
@@ -95,11 +96,25 @@ class ChatCompletionClient:
         if extra:
             payload.update(extra)
 
-        r = requests.post(
-            f"{self._api_base_v1()}/chat/completions",
-            headers=self._headers(),
-            data=json.dumps(payload),
-            timeout=300,
-        )
-        r.raise_for_status()
-        return r.json()["choices"][0]["message"]["content"]
+        url = f"{self._api_base_v1()}/chat/completions"
+        body = json.dumps(payload)
+        attempts = 3
+        for attempt in range(1, attempts + 1):
+            try:
+                r = requests.post(url, headers=self._headers(), data=body, timeout=300)
+            except (requests.ConnectionError, requests.Timeout) as exc:
+                if attempt == attempts:
+                    raise
+                log.warning("LLM call attempt %d/%d failed: %s; retrying", attempt, attempts, exc)
+                time.sleep(2**attempt)
+                continue
+            if r.status_code >= 500 and attempt < attempts:
+                log.warning(
+                    "LLM call attempt %d/%d returned %d; retrying",
+                    attempt, attempts, r.status_code,
+                )
+                time.sleep(2**attempt)
+                continue
+            r.raise_for_status()
+            return r.json()["choices"][0]["message"]["content"]
+        raise RuntimeError("unreachable")  # loop always returns or raises

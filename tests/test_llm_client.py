@@ -18,6 +18,7 @@ class ChatCompletionClientTests(unittest.TestCase):
             "llm_client.requests.post"
         ) as mock_post:
             mock_post.return_value = Mock(
+                status_code=200,
                 json=Mock(return_value={"choices": [{"message": {"content": "ok"}}]}),
                 raise_for_status=Mock(),
             )
@@ -40,6 +41,7 @@ class ChatCompletionClientTests(unittest.TestCase):
                 json=Mock(return_value={"data": [{"id": "auto-model"}, {"id": "other"}]}),
             )
             mock_post.return_value = Mock(
+                status_code=200,
                 json=Mock(return_value={"choices": [{"message": {"content": "ok"}}]}),
                 raise_for_status=Mock(),
             )
@@ -73,6 +75,7 @@ class ChatCompletionClientTests(unittest.TestCase):
                 json=Mock(return_value={"data": [{"id": "auto-model"}]}),
             )
             mock_post.return_value = Mock(
+                status_code=200,
                 json=Mock(return_value={"choices": [{"message": {"content": "ok"}}]}),
                 raise_for_status=Mock(),
             )
@@ -101,6 +104,7 @@ class ChatCompletionClientTests(unittest.TestCase):
             "llm_client.requests.post"
         ) as mock_post:
             mock_post.return_value = Mock(
+                status_code=200,
                 json=Mock(return_value={"choices": [{"message": {"content": "ok"}}]}),
                 raise_for_status=Mock(),
             )
@@ -120,6 +124,7 @@ class ChatCompletionClientTests(unittest.TestCase):
             "llm_client.requests.post"
         ) as mock_post:
             mock_post.return_value = Mock(
+                status_code=200,
                 json=Mock(return_value={"choices": [{"message": {"content": "ok"}}]}),
                 raise_for_status=Mock(),
             )
@@ -128,6 +133,26 @@ class ChatCompletionClientTests(unittest.TestCase):
             client.complete([{"role": "user", "content": "hi"}])
 
         self.assertNotIn("X-HF-Bill-To", mock_post.call_args.kwargs["headers"])
+
+    def test_complete_retries_on_5xx_then_succeeds(self) -> None:
+        flaky = Mock(
+            status_code=504,
+            json=Mock(return_value={}),
+            raise_for_status=Mock(side_effect=AssertionError("should not be called")),
+        )
+        ok = Mock(
+            status_code=200,
+            json=Mock(return_value={"choices": [{"message": {"content": "ok"}}]}),
+            raise_for_status=Mock(),
+        )
+        with patch("llm_client.time.sleep"), patch(
+            "llm_client.requests.post", side_effect=[flaky, ok]
+        ) as mock_post:
+            client = ChatCompletionClient("https://example.com/v1", "token", "fixed-model")
+            content = client.complete([{"role": "user", "content": "hi"}])
+
+        self.assertEqual(content, "ok")
+        self.assertEqual(mock_post.call_count, 2)
 
     def test_complete_raises_when_discovery_returns_no_models(self) -> None:
         with patch("llm_client.requests.get") as mock_get, patch(
