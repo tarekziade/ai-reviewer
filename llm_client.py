@@ -9,6 +9,23 @@ import requests
 log = logging.getLogger(__name__)
 
 
+@dataclass
+class ChatResult:
+    content: str
+    usage: dict[str, Any] = field(default_factory=dict)
+    latency_seconds: float = 0.0
+
+    @property
+    def prompt_tokens(self) -> Optional[int]:
+        v = self.usage.get("prompt_tokens")
+        return v if isinstance(v, int) else None
+
+    @property
+    def completion_tokens(self) -> Optional[int]:
+        v = self.usage.get("completion_tokens")
+        return v if isinstance(v, int) else None
+
+
 class ChatCompletionClient:
     """Minimal OpenAI-compatible /v1/chat/completions client.
 
