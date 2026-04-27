@@ -154,6 +154,33 @@ class ChatCompletionClientTests(unittest.TestCase):
         self.assertEqual(result.content, "ok")
         self.assertEqual(mock_post.call_count, 2)
 
+    def test_complete_consumes_sse_stream_when_streaming_enabled(self) -> None:
+        sse_lines = [
+            'data: {"choices":[{"delta":{"content":"he"}}]}',
+            'data: {"choices":[{"delta":{"content":"llo"}}]}',
+            'data: {"choices":[{"delta":{}}],"usage":{"prompt_tokens":3,"completion_tokens":2}}',
+            "data: [DONE]",
+        ]
+        with patch("llm_client.requests.post") as mock_post:
+            mock_post.return_value = Mock(
+                status_code=200,
+                raise_for_status=Mock(),
+                iter_lines=Mock(return_value=iter(sse_lines)),
+            )
+
+            client = ChatCompletionClient(
+                "https://example.com/v1", "token", "fixed-model", stream=True
+            )
+            result = client.complete([{"role": "user", "content": "hi"}])
+
+        self.assertEqual(result.content, "hello")
+        self.assertEqual(result.prompt_tokens, 3)
+        self.assertEqual(result.completion_tokens, 2)
+        payload = json.loads(mock_post.call_args.kwargs["data"])
+        self.assertTrue(payload["stream"])
+        self.assertEqual(payload["stream_options"], {"include_usage": True})
+        self.assertTrue(mock_post.call_args.kwargs["stream"])
+
     def test_complete_raises_when_discovery_returns_no_models(self) -> None:
         with patch("llm_client.requests.get") as mock_get, patch(
             "llm_client.requests.post"

@@ -40,11 +40,13 @@ class ChatCompletionClient:
         api_key: str,
         model: Optional[str] = None,
         bill_to: Optional[str] = None,
+        stream: bool = False,
     ):
         self.api_base = api_base.rstrip("/")
         self.api_key = api_key
         self.model = model
         self.bill_to = bill_to or None
+        self.stream = stream
 
     def _api_base_v1(self) -> str:
         if self.api_base.endswith("/v1"):
@@ -113,6 +115,11 @@ class ChatCompletionClient:
         }
         if response_format is not None:
             payload["response_format"] = response_format
+        if self.stream:
+            payload["stream"] = True
+            # Ask servers that support it to deliver a final usage chunk.
+            # Servers that don't honor this still stream content correctly.
+            payload["stream_options"] = {"include_usage": True}
         if extra:
             payload.update(extra)
 
@@ -122,7 +129,13 @@ class ChatCompletionClient:
         started = time.monotonic()
         for attempt in range(1, attempts + 1):
             try:
-                r = requests.post(url, headers=self._headers(), data=body, timeout=300)
+                r = requests.post(
+                    url,
+                    headers=self._headers(),
+                    data=body,
+                    timeout=300,
+                    stream=self.stream,
+                )
             except (requests.ConnectionError, requests.Timeout) as exc:
                 if attempt == attempts:
                     raise
@@ -144,15 +157,52 @@ class ChatCompletionClient:
                 time.sleep(2**attempt)
                 continue
             r.raise_for_status()
-            data = r.json()
-            content = data["choices"][0]["message"]["content"]
-            usage = data.get("usage") or {}
+            if self.stream:
+                content, usage = self._consume_stream(r)
+            else:
+                data = r.json()
+                content = data["choices"][0]["message"]["content"]
+                usage = data.get("usage") or {}
             latency = time.monotonic() - started
             log.info(
-                "LLM call ok in %.1fs (prompt=%s, completion=%s)",
+                "LLM call ok in %.1fs (prompt=%s, completion=%s, stream=%s)",
                 latency,
                 usage.get("prompt_tokens"),
                 usage.get("completion_tokens"),
+                self.stream,
             )
             return ChatResult(content=content, usage=usage, latency_seconds=latency)
         raise RuntimeError("unreachable")  # loop always returns or raises
+
+    @staticmethod
+    def _consume_stream(r: "requests.Response") -> tuple[str, dict[str, Any]]:
+        """Parse an OpenAI-style SSE chat-completions stream.
+
+        Each event is a `data: {json}` line; the terminal event is `data: [DONE]`.
+        We accumulate `choices[0].delta.content` and capture the trailing `usage`
+        block when the server emits one (requires stream_options.include_usage)."""
+        parts: list[str] = []
+        usage: dict[str, Any] = {}
+        for raw in r.iter_lines(decode_unicode=True):
+            if not raw:
+                continue
+            if not raw.startswith("data:"):
+                continue
+            chunk = raw[5:].strip()
+            if chunk == "[DONE]":
+                break
+            try:
+                event = json.loads(chunk)
+            except json.JSONDecodeError:
+                log.debug("skipping unparseable stream chunk: %r", chunk[:200])
+                continue
+            chunk_usage = event.get("usage")
+            if isinstance(chunk_usage, dict):
+                usage = chunk_usage
+            choices = event.get("choices") or []
+            if choices:
+                delta = choices[0].get("delta") or {}
+                piece = delta.get("content")
+                if isinstance(piece, str):
+                    parts.append(piece)
+        return "".join(parts), usage

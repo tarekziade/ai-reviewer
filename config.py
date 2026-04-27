@@ -35,6 +35,7 @@ class Config:
     llm_model: Optional[str]
     llm_bill_to: Optional[str]
     llm_max_tokens: int
+    llm_stream: bool
 
     mention_trigger: str
     review_event: str
@@ -74,6 +75,7 @@ class Config:
             llm_model=os.environ.get("LLM_MODEL") or None,
             llm_bill_to=os.environ.get("LLM_BILL_TO") or None,
             llm_max_tokens=_int_env("LLM_MAX_TOKENS", 4096),
+            llm_stream=os.environ.get("LLM_STREAM", "").lower() in ("1", "true", "yes"),
             mention_trigger=os.environ.get("MENTION_TRIGGER", "@serge"),
             review_event=os.environ.get("REVIEW_EVENT", "COMMENT"),
             max_diff_chars=_int_env("MAX_DIFF_CHARS", 200000),

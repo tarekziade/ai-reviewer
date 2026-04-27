@@ -160,7 +160,11 @@ def run_review(cfg: Config, gh: GitHubClient, req: ReviewRequest) -> None:
     review_rules = _load_review_rules(gh, req.owner, req.repo, pr, cfg)
 
     llm = ChatCompletionClient(
-        cfg.llm_api_base, cfg.llm_api_key, cfg.llm_model, bill_to=cfg.llm_bill_to
+        cfg.llm_api_base,
+        cfg.llm_api_key,
+        cfg.llm_model,
+        bill_to=cfg.llm_bill_to,
+        stream=cfg.llm_stream,
     )
     system_prompt = build_system_prompt(review_rules)
     user_prompt = build_user_prompt(

@@ -40,3 +40,4 @@ jobs:
           llm_bill_to: ${{ secrets.LLM_BILL_TO }}
           llm_max_tokens: ${{ secrets.LLM_MAX_TOKENS }}
           max_diff_chars: ${{ secrets.MAX_DIFF_CHARS }}
+          llm_stream: 'true'

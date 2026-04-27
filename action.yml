@@ -23,6 +23,10 @@ inputs:
     description: 'Maximum completion tokens requested from the LLM. Bump for reasoning models (e.g. Kimi-K2) that spend tokens on reasoning before emitting JSON.'
     required: false
     default: '4096'
+  llm_stream:
+    description: 'Set to "true" to consume the chat-completion response as a streaming SSE feed. Off by default; useful for endpoints/proxies that drop long-running non-streaming connections.'
+    required: false
+    default: 'false'
   mention_trigger:
     description: 'Phrase that must appear in a comment to trigger a review.'
     required: false
@@ -73,6 +77,7 @@ runs:
         LLM_MODEL: ${{ inputs.llm_model }}
         LLM_BILL_TO: ${{ inputs.llm_bill_to }}
         LLM_MAX_TOKENS: ${{ inputs.llm_max_tokens }}
+        LLM_STREAM: ${{ inputs.llm_stream }}
         MENTION_TRIGGER: ${{ inputs.mention_trigger }}
         REVIEW_EVENT: ${{ inputs.review_event }}
         MAX_DIFF_CHARS: ${{ inputs.max_diff_chars }}
