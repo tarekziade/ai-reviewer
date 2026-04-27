@@ -35,4 +35,5 @@ jobs:
         uses: ./
         with:
           llm_api_key: ${{ secrets.LLM_API_KEY }}
-          llm_api_base: ${{ secrets.LLM_API_BASE || 'https://api.openai.com/v1' }}
+          llm_api_base: ${{ secrets.LLM_API_BASE }}
+          llm_model: ${{ secrets.LLM_MODEL }}
