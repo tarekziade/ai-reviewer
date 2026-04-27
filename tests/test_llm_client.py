@@ -96,6 +96,39 @@ class ChatCompletionClientTests(unittest.TestCase):
             "https://example.com/v1/chat/completions",
         )
 
+    def test_complete_sends_bill_to_header_when_configured(self) -> None:
+        with patch("llm_client.requests.get") as mock_get, patch(
+            "llm_client.requests.post"
+        ) as mock_post:
+            mock_post.return_value = Mock(
+                json=Mock(return_value={"choices": [{"message": {"content": "ok"}}]}),
+                raise_for_status=Mock(),
+            )
+
+            client = ChatCompletionClient(
+                "https://example.com/v1", "token", "fixed-model", bill_to="my-org"
+            )
+            client.complete([{"role": "user", "content": "hi"}])
+
+        mock_get.assert_not_called()
+        self.assertEqual(
+            mock_post.call_args.kwargs["headers"]["X-HF-Bill-To"], "my-org"
+        )
+
+    def test_complete_omits_bill_to_header_when_not_configured(self) -> None:
+        with patch("llm_client.requests.get"), patch(
+            "llm_client.requests.post"
+        ) as mock_post:
+            mock_post.return_value = Mock(
+                json=Mock(return_value={"choices": [{"message": {"content": "ok"}}]}),
+                raise_for_status=Mock(),
+            )
+
+            client = ChatCompletionClient("https://example.com/v1", "token", "fixed-model")
+            client.complete([{"role": "user", "content": "hi"}])
+
+        self.assertNotIn("X-HF-Bill-To", mock_post.call_args.kwargs["headers"])
+
     def test_complete_raises_when_discovery_returns_no_models(self) -> None:
         with patch("llm_client.requests.get") as mock_get, patch(
             "llm_client.requests.post"

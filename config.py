@@ -3,6 +3,14 @@ from dataclasses import dataclass
 from typing import Optional
 
 
+def _int_env(name: str, default: int) -> int:
+    """Like int(os.environ[name]) with a default, but also treats an empty
+    string as "use default" so unset GitHub Action secrets (which forward as
+    "") don't blow up int parsing."""
+    raw = (os.environ.get(name) or "").strip()
+    return int(raw) if raw else default
+
+
 def _load_private_key() -> Optional[str]:
     inline = os.environ.get("GITHUB_PRIVATE_KEY")
     if inline:
@@ -25,6 +33,8 @@ class Config:
     llm_api_base: str
     llm_api_key: str
     llm_model: Optional[str]
+    llm_bill_to: Optional[str]
+    llm_max_tokens: int
 
     mention_trigger: str
     review_event: str
@@ -62,9 +72,11 @@ class Config:
             llm_api_base=os.environ.get("LLM_API_BASE", "https://api.openai.com/v1").rstrip("/"),
             llm_api_key=os.environ["LLM_API_KEY"],
             llm_model=os.environ.get("LLM_MODEL") or None,
+            llm_bill_to=os.environ.get("LLM_BILL_TO") or None,
+            llm_max_tokens=_int_env("LLM_MAX_TOKENS", 4096),
             mention_trigger=os.environ.get("MENTION_TRIGGER", "@serge"),
             review_event=os.environ.get("REVIEW_EVENT", "COMMENT"),
-            max_diff_chars=int(os.environ.get("MAX_DIFF_CHARS", "200000")),
+            max_diff_chars=_int_env("MAX_DIFF_CHARS", 200000),
             review_rules_path=os.environ.get("REVIEW_RULES_PATH", ".ai/review-rules.md"),
             default_review_rules=os.environ.get(
                 "DEFAULT_REVIEW_RULES",

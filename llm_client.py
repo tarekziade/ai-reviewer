@@ -15,10 +15,17 @@ class ChatCompletionClient:
     LM Studio, llama.cpp server, etc.
     """
 
-    def __init__(self, api_base: str, api_key: str, model: Optional[str] = None):
+    def __init__(
+        self,
+        api_base: str,
+        api_key: str,
+        model: Optional[str] = None,
+        bill_to: Optional[str] = None,
+    ):
         self.api_base = api_base.rstrip("/")
         self.api_key = api_key
         self.model = model
+        self.bill_to = bill_to or None
 
     def _api_base_v1(self) -> str:
         if self.api_base.endswith("/v1"):
@@ -26,10 +33,14 @@ class ChatCompletionClient:
         return f"{self.api_base}/v1"
 
     def _headers(self) -> dict[str, str]:
-        return {
+        headers = {
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
+        if self.bill_to:
+            # HF Router: route inference billing to an org the token has access to.
+            headers["X-HF-Bill-To"] = self.bill_to
+        return headers
 
     def _discover_model(self) -> str:
         models_url = f"{self._api_base_v1()}/models"

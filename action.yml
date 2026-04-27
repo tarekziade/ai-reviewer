@@ -16,6 +16,13 @@ inputs:
   llm_model:
     description: 'Model identifier to pass in the chat-completion request. If omitted, the action auto-discovers the first model from {llm_api_base}/models.'
     required: false
+  llm_bill_to:
+    description: 'Optional org slug for routing inference billing (sent as the X-HF-Bill-To header). Required when using a Hugging Face token whose Inference Providers permission is scoped to an organization rather than the user.'
+    required: false
+  llm_max_tokens:
+    description: 'Maximum completion tokens requested from the LLM. Bump for reasoning models (e.g. Kimi-K2) that spend tokens on reasoning before emitting JSON.'
+    required: false
+    default: '4096'
   mention_trigger:
     description: 'Phrase that must appear in a comment to trigger a review.'
     required: false
@@ -64,6 +71,8 @@ runs:
         LLM_API_BASE: ${{ inputs.llm_api_base }}
         LLM_API_KEY: ${{ inputs.llm_api_key }}
         LLM_MODEL: ${{ inputs.llm_model }}
+        LLM_BILL_TO: ${{ inputs.llm_bill_to }}
+        LLM_MAX_TOKENS: ${{ inputs.llm_max_tokens }}
         MENTION_TRIGGER: ${{ inputs.mention_trigger }}
         REVIEW_EVENT: ${{ inputs.review_event }}
         MAX_DIFF_CHARS: ${{ inputs.max_diff_chars }}
