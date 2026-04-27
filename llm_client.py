@@ -9,33 +9,6 @@ import requests
 log = logging.getLogger(__name__)
 
 
-<<<<<<< Updated upstream
-=======
-class AddingSomethingUseless:
-    pass
-
-
-p = AddingSomethingUseless()
-
-
-@dataclass
-class ChatResult:
-    content: str
-    usage: dict[str, Any] = field(default_factory=dict)
-    latency_seconds: float = 0.0
-
-    @property
-    def prompt_tokens(self) -> Optional[int]:
-        v = self.usage.get("prompt_tokens")
-        return v if isinstance(v, int) else None
-
-    @property
-    def completion_tokens(self) -> Optional[int]:
-        v = self.usage.get("completion_tokens")
-        return v if isinstance(v, int) else None
-
-
->>>>>>> Stashed changes
 class ChatCompletionClient:
     """Minimal OpenAI-compatible /v1/chat/completions client.
 
@@ -86,7 +59,9 @@ class ChatCompletionClient:
         try:
             payload = response.json()
         except ValueError as exc:
-            raise RuntimeError(f"Failed to parse {models_url} response as JSON.") from exc
+            raise RuntimeError(
+                f"Failed to parse {models_url} response as JSON."
+            ) from exc
 
         data = payload.get("data")
         first_model = data[0] if isinstance(data, list) and data else None
@@ -134,13 +109,20 @@ class ChatCompletionClient:
             except (requests.ConnectionError, requests.Timeout) as exc:
                 if attempt == attempts:
                     raise
-                log.warning("LLM call attempt %d/%d failed: %s; retrying", attempt, attempts, exc)
+                log.warning(
+                    "LLM call attempt %d/%d failed: %s; retrying",
+                    attempt,
+                    attempts,
+                    exc,
+                )
                 time.sleep(2**attempt)
                 continue
             if r.status_code >= 500 and attempt < attempts:
                 log.warning(
                     "LLM call attempt %d/%d returned %d; retrying",
-                    attempt, attempts, r.status_code,
+                    attempt,
+                    attempts,
+                    r.status_code,
                 )
                 time.sleep(2**attempt)
                 continue
