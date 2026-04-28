@@ -220,13 +220,26 @@ review, piping a JSON document on stdin:
 }
 ```
 
-Anything the script writes to stdout is stitched into the user prompt
-inside a `REPO-PROVIDED CONTEXT` block — use it to flag high-risk file
-combinations, point the reviewer at related code, or surface repo
-conventions. The script must be executable; if it's missing, not
-executable, exits non-zero, or times out (default 30 s), the review
-proceeds without extra context. This repo dogfoods the feature with a
-Python script at `.ai/context-script`.
+The script's stdout can be either:
+
+- **Plain text** — stitched into the user prompt inside a
+  `REPO-PROVIDED CONTEXT` block. Use it to flag high-risk file
+  combinations, point the reviewer at related code, or surface repo
+  conventions.
+- **A JSON object** — `{"context": str, "skip_files": [str]}`. Both
+  fields are optional. `skip_files` lets the repo tell the reviewer to
+  exclude specific paths from the diff entirely (e.g. auto-generated
+  files in repos that regenerate them from a modular source); the
+  reviewer mentions the skip list neutrally to the LLM but does not
+  send those patches.
+
+The script must be executable; if it's missing, not executable, exits
+non-zero, times out (default 30 s), or emits malformed JSON, the
+review proceeds without extra context or skip filtering. This repo
+dogfoods the plain-text mode with a Python script at
+`.ai/context-script`; the structured-output mode is used by
+[`transformers`](https://github.com/huggingface/transformers) to skip
+auto-generated model files.
 
 The script runs in Action mode only (the App-mode webhook does not
 check out the repo). It executes from the default branch (since

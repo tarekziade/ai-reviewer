@@ -1,10 +1,24 @@
-"""Runs an optional repo-local script that can inject extra context into
-the reviewer prompt.
+"""Runs an optional repo-local script that influences the review.
 
 The script lives in the target repo (typically at `.ai/context-script`),
 must be executable, and is invoked with no arguments. We send a JSON
-document on stdin describing the PR; whatever the script writes to stdout
-is stitched into the user prompt as repo-supplied context.
+document on stdin describing the PR; the script's stdout can take two
+shapes:
+
+1. **Plain text** — stitched into the user prompt verbatim, inside a
+   `REPO-PROVIDED CONTEXT` block.
+
+2. **JSON object** with this shape (any field optional):
+
+       {
+         "context": "<text to inject into the prompt>",
+         "skip_files": ["path/a.py", "path/b.py"]
+       }
+
+   `skip_files` lets the repo tell the reviewer which paths to drop
+   from the diff entirely (e.g. auto-generated files in repos that
+   regenerate them from a modular source). The reviewer mentions the
+   skip list neutrally to the LLM but does not send those patches.
 
 Trust model: the script is whatever sits at the configured path in the
 checked-out tree — in Action mode, that's the default branch (Actions
@@ -29,11 +43,22 @@ import json
 import logging
 import os
 import subprocess
+from dataclasses import dataclass, field
 from typing import Optional
 
 log = logging.getLogger(__name__)
 
 MAX_OUTPUT_CHARS = 8000
+
+
+@dataclass
+class ContextScriptResult:
+    context: Optional[str] = None
+    skip_files: list[str] = field(default_factory=list)
+
+    @property
+    def empty(self) -> bool:
+        return not self.context and not self.skip_files
 
 
 def _shape_files(files: list[dict]) -> list[dict]:
@@ -54,6 +79,55 @@ def _shape_files(files: list[dict]) -> list[dict]:
     return out
 
 
+def _truncate(text: str) -> str:
+    if len(text) <= MAX_OUTPUT_CHARS:
+        return text
+    return (
+        text[:MAX_OUTPUT_CHARS]
+        + f"\n[... truncated, {len(text) - MAX_OUTPUT_CHARS} chars omitted ...]"
+    )
+
+
+def _parse_stdout(stdout: str) -> Optional[ContextScriptResult]:
+    """Decide whether stdout is structured JSON or plain text, and shape it.
+
+    JSON wins only if the entire stdout parses to a dict — otherwise we
+    fall back to treating it as a plain context block, which keeps simple
+    shell-script consumers working.
+    """
+    text = (stdout or "").strip()
+    if not text:
+        return None
+
+    parsed: Optional[dict] = None
+    if text.startswith("{") and text.endswith("}"):
+        try:
+            candidate = json.loads(text)
+        except json.JSONDecodeError:
+            candidate = None
+        if isinstance(candidate, dict):
+            parsed = candidate
+
+    if parsed is None:
+        return ContextScriptResult(context=_truncate(text), skip_files=[])
+
+    ctx_raw = parsed.get("context")
+    context = (
+        _truncate(ctx_raw.strip())
+        if isinstance(ctx_raw, str) and ctx_raw.strip()
+        else None
+    )
+
+    skip_raw = parsed.get("skip_files") or []
+    if not isinstance(skip_raw, list):
+        log.warning("context script returned non-list skip_files; ignoring")
+        skip_raw = []
+    skip_files = [s for s in skip_raw if isinstance(s, str) and s]
+
+    result = ContextScriptResult(context=context, skip_files=skip_files)
+    return None if result.empty else result
+
+
 def run_context_script(
     script_path: str,
     *,
@@ -62,14 +136,14 @@ def run_context_script(
     files: list[dict],
     timeout_seconds: int,
     cwd: Optional[str] = None,
-) -> Optional[str]:
-    """Run `script_path` and return its stdout, or None if it should be skipped.
+) -> Optional[ContextScriptResult]:
+    """Run `script_path` and return its parsed result, or None if nothing useful.
 
-    A return of None means "don't add anything to the prompt" — for any of:
-    not configured, file missing, not executable, timed out, crashed,
-    non-zero exit, or empty output. We never raise to the caller; failures
-    are logged and swallowed because a broken context hook should not break
-    the review.
+    A return of None means "don't change anything" — for any of: not
+    configured, file missing, not executable, timed out, crashed,
+    non-zero exit, or empty output. We never raise to the caller;
+    failures are logged and swallowed because a broken context hook
+    should not break the review.
     """
     if not script_path:
         return None
@@ -114,12 +188,4 @@ def run_context_script(
         )
         return None
 
-    out = (proc.stdout or "").strip()
-    if not out:
-        return None
-    if len(out) > MAX_OUTPUT_CHARS:
-        out = (
-            out[:MAX_OUTPUT_CHARS]
-            + f"\n[... truncated, {len(out) - MAX_OUTPUT_CHARS} chars omitted ...]"
-        )
-    return out
+    return _parse_stdout(proc.stdout)
