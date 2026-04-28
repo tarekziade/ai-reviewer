@@ -192,6 +192,16 @@ class ChatCompletionClient:
     # still arriving from the LLM (and lets us spot a hang vs a slow stream).
     PROGRESS_INTERVAL_SECONDS = 10.0
 
+    # Delta keys that reasoning/thinking models stream their chain-of-thought
+    # into (instead of `content`). We buffer these so we can periodically dump
+    # the latest chunk into the action log — useful for watching what the
+    # model is actually doing during a long stream.
+    REASONING_DELTA_KEYS = ("reasoning", "reasoning_content", "thinking")
+
+    # Flush a slice of buffered reasoning to the log once this many new chars
+    # have arrived since the last flush.
+    REASONING_FLUSH_CHARS = 400
+
     @classmethod
     def _consume_stream(cls, r: "requests.Response") -> tuple[str, dict[str, Any]]:
         """Parse an OpenAI-style SSE chat-completions stream.
@@ -217,6 +227,10 @@ class ChatCompletionClient:
         # Per-field char counts across all observed delta keys, so it's
         # obvious in the log if the model streams into a non-standard field.
         delta_field_chars: dict[str, int] = {}
+        # Buffer reasoning chunks so we can periodically flush a tail of them
+        # to the log; tracks the offset already logged.
+        reasoning_buffer: list[str] = []
+        reasoning_logged_chars = 0
         first_delta_logged = False
         stream_started = time.monotonic()
         last_progress = stream_started
@@ -264,10 +278,21 @@ class ChatCompletionClient:
                             delta_field_chars[key] = (
                                 delta_field_chars.get(key, 0) + len(value)
                             )
+                            if key in cls.REASONING_DELTA_KEYS:
+                                reasoning_buffer.append(value)
                     piece = delta.get("content")
                     if isinstance(piece, str):
                         parts.append(piece)
                         chars += len(piece)
+                    total_reasoning = sum(len(s) for s in reasoning_buffer)
+                    if (
+                        total_reasoning - reasoning_logged_chars
+                        >= cls.REASONING_FLUSH_CHARS
+                    ):
+                        joined = "".join(reasoning_buffer)
+                        new_slice = joined[reasoning_logged_chars:]
+                        log.info("LLM reasoning >> %s", cls._compact(new_slice))
+                        reasoning_logged_chars = len(joined)
         except (
             requests.exceptions.ChunkedEncodingError,
             requests.ConnectionError,
@@ -282,6 +307,10 @@ class ChatCompletionClient:
                 exc,
             )
             raise
+        joined_reasoning = "".join(reasoning_buffer)
+        if len(joined_reasoning) > reasoning_logged_chars:
+            tail = joined_reasoning[reasoning_logged_chars:]
+            log.info("LLM reasoning >> %s", cls._compact(tail))
         log.info(
             "LLM stream complete: %.1fs elapsed, %d events, %d content chars, "
             "delta fields=%s",
@@ -302,3 +331,9 @@ class ChatCompletionClient:
     def _truncate_repr(obj: Any, limit: int) -> str:
         s = json.dumps(obj, default=str, ensure_ascii=False)
         return s if len(s) <= limit else s[:limit] + "..."
+
+    @staticmethod
+    def _compact(text: str) -> str:
+        """Collapse whitespace/newlines so a multi-line reasoning chunk fits
+        on a single log line, keeping the action's console output readable."""
+        return " ".join(text.split())
