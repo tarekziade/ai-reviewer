@@ -46,6 +46,11 @@ class Config:
     persona_header: str
     context_script_path: str
     context_script_timeout: int
+    # Path to the checked-out PR head; when set, the LLM gets read-only
+    # browse tools (read_file/list_dir/grep) rooted here. Empty disables
+    # tool use entirely.
+    repo_checkout_path: str
+    tool_max_iterations: int
 
     @classmethod
     def from_env(cls, *, require_app: bool = True) -> "Config":
@@ -90,4 +95,6 @@ class Config:
             persona_header=os.environ.get("PERSONA_HEADER", "🤗 **Serge** says:"),
             context_script_path=os.environ.get("CONTEXT_SCRIPT_PATH", ".ai/context-script"),
             context_script_timeout=_int_env("CONTEXT_SCRIPT_TIMEOUT", 30),
+            repo_checkout_path=(os.environ.get("REPO_CHECKOUT_PATH") or "").strip(),
+            tool_max_iterations=_int_env("TOOL_MAX_ITERATIONS", 8),
         )

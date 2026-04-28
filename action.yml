@@ -55,6 +55,14 @@ inputs:
     description: 'Seconds to wait for the context script before giving up.'
     required: false
     default: '30'
+  repo_checkout_path:
+    description: 'Path to a local checkout of the PR head ref. When set, the reviewer exposes read-only browse tools (read_file/list_dir/grep) rooted here so the LLM can fetch context beyond the diff. Defaults to GITHUB_WORKSPACE; set to an empty string to disable tools entirely. The caller workflow is responsible for checking out the PR head ref (e.g. with `actions/checkout@v4` and `ref: refs/pull/<number>/head`) before invoking this action.'
+    required: false
+    default: ${{ github.workspace }}
+  tool_max_iterations:
+    description: 'Maximum number of tool-calling rounds before forcing the model to produce a final review. Each iteration is a separate LLM call.'
+    required: false
+    default: '8'
   github_token:
     description: 'Token with pull-requests:write. Defaults to the job token.'
     required: false
@@ -93,4 +101,6 @@ runs:
         DEFAULT_REVIEW_RULES: ${{ inputs.default_review_rules }}
         CONTEXT_SCRIPT_PATH: ${{ inputs.context_script_path }}
         CONTEXT_SCRIPT_TIMEOUT: ${{ inputs.context_script_timeout }}
+        REPO_CHECKOUT_PATH: ${{ inputs.repo_checkout_path }}
+        TOOL_MAX_ITERATIONS: ${{ inputs.tool_max_iterations }}
       run: reviewbot-action

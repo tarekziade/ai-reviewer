@@ -236,6 +236,95 @@ class ChatCompletionClientTests(unittest.TestCase):
 
         self.assertEqual(mock_post.call_count, 3)
 
+    def test_stream_assembles_tool_calls_across_chunks(self) -> None:
+        # Two tool_calls, each split across multiple chunks. The arguments
+        # for index 0 (`read_file`) and index 1 (`grep`) arrive piecewise.
+        sse_lines = [
+            'data: {"choices":[{"delta":{"tool_calls":['
+            '{"index":0,"id":"call_a","function":{"name":"read_file","arguments":"{\\"pat"}}'
+            "]}}]}",
+            'data: {"choices":[{"delta":{"tool_calls":['
+            '{"index":0,"function":{"arguments":"h\\":\\"src/main.py\\"}"}}'
+            "]}}]}",
+            'data: {"choices":[{"delta":{"tool_calls":['
+            '{"index":1,"id":"call_b","function":{"name":"grep","arguments":"{\\"pat"}}'
+            "]}}]}",
+            'data: {"choices":[{"delta":{"tool_calls":['
+            '{"index":1,"function":{"arguments":"tern\\":\\"hello\\"}"}}'
+            "]}}]}",
+            'data: {"choices":[{"finish_reason":"tool_calls","delta":{}}]}',
+            "data: [DONE]",
+        ]
+        with patch("reviewbot.llm_client.requests.post") as mock_post:
+            mock_post.return_value = Mock(
+                status_code=200,
+                raise_for_status=Mock(),
+                iter_lines=Mock(return_value=iter(sse_lines)),
+            )
+            client = ChatCompletionClient(
+                "https://example.com/v1", "token", "fixed-model", stream=True
+            )
+            result = client.complete(
+                [{"role": "user", "content": "hi"}],
+                tools=[{"type": "function", "function": {"name": "read_file"}}],
+            )
+
+        self.assertEqual(result.finish_reason, "tool_calls")
+        self.assertEqual(len(result.tool_calls), 2)
+        self.assertEqual(result.tool_calls[0].id, "call_a")
+        self.assertEqual(result.tool_calls[0].name, "read_file")
+        self.assertEqual(
+            json.loads(result.tool_calls[0].arguments), {"path": "src/main.py"}
+        )
+        self.assertEqual(result.tool_calls[1].id, "call_b")
+        self.assertEqual(result.tool_calls[1].name, "grep")
+        self.assertEqual(
+            json.loads(result.tool_calls[1].arguments), {"pattern": "hello"}
+        )
+
+    def test_non_stream_parses_tool_calls(self) -> None:
+        with patch("reviewbot.llm_client.requests.post") as mock_post:
+            mock_post.return_value = Mock(
+                status_code=200,
+                json=Mock(
+                    return_value={
+                        "choices": [
+                            {
+                                "finish_reason": "tool_calls",
+                                "message": {
+                                    "content": None,
+                                    "tool_calls": [
+                                        {
+                                            "id": "call_x",
+                                            "type": "function",
+                                            "function": {
+                                                "name": "list_dir",
+                                                "arguments": '{"path":"src"}',
+                                            },
+                                        }
+                                    ],
+                                },
+                            }
+                        ]
+                    }
+                ),
+                raise_for_status=Mock(),
+            )
+            client = ChatCompletionClient(
+                "https://example.com/v1", "token", "fixed-model", stream=False
+            )
+            result = client.complete(
+                [{"role": "user", "content": "hi"}],
+                tools=[{"type": "function", "function": {"name": "list_dir"}}],
+            )
+
+        self.assertEqual(result.finish_reason, "tool_calls")
+        self.assertEqual(len(result.tool_calls), 1)
+        self.assertEqual(result.tool_calls[0].name, "list_dir")
+        self.assertEqual(
+            json.loads(result.tool_calls[0].arguments), {"path": "src"}
+        )
+
     def test_complete_raises_when_discovery_returns_no_models(self) -> None:
         with patch("reviewbot.llm_client.requests.get") as mock_get, patch(
             "reviewbot.llm_client.requests.post"

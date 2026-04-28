@@ -28,8 +28,20 @@ jobs:
         github.event.comment.author_association == 'COLLABORATOR'))
     runs-on: ubuntu-latest
     steps:
-      - name: Check out repository
+      - name: Resolve PR number
+        id: pr
+        run: |
+          if [ -n "${{ github.event.issue.number }}" ]; then
+            echo "number=${{ github.event.issue.number }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "number=${{ github.event.pull_request.number }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check out PR head (shallow)
         uses: actions/checkout@v4
+        with:
+          ref: refs/pull/${{ steps.pr.outputs.number }}/head
+          fetch-depth: 1
 
       - name: Run local AI reviewer action
         uses: ./

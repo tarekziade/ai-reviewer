@@ -10,10 +10,22 @@ log = logging.getLogger(__name__)
 
 
 @dataclass
+class ToolCall:
+    """One tool/function call emitted by the assistant. ``arguments`` is
+    the raw string the model produced — the caller is responsible for
+    JSON-parsing it (and for handling models that emit malformed JSON)."""
+    id: str
+    name: str
+    arguments: str
+
+
+@dataclass
 class ChatResult:
     content: str
     usage: dict[str, Any] = field(default_factory=dict)
     latency_seconds: float = 0.0
+    tool_calls: list[ToolCall] = field(default_factory=list)
+    finish_reason: Optional[str] = None
 
     @property
     def prompt_tokens(self) -> Optional[int]:
@@ -100,11 +112,13 @@ class ChatCompletionClient:
 
     def complete(
         self,
-        messages: list[dict[str, str]],
+        messages: list[dict[str, Any]],
         *,
         response_format: Optional[dict[str, Any]] = None,
         temperature: float = 0.0,
         max_tokens: int = 4096,
+        tools: Optional[list[dict[str, Any]]] = None,
+        tool_choice: Optional[Any] = None,
         extra: Optional[dict[str, Any]] = None,
     ) -> ChatResult:
         payload: dict[str, Any] = {
@@ -115,6 +129,10 @@ class ChatCompletionClient:
         }
         if response_format is not None:
             payload["response_format"] = response_format
+        if tools:
+            payload["tools"] = tools
+            if tool_choice is not None:
+                payload["tool_choice"] = tool_choice
         if self.stream:
             payload["stream"] = True
             # Ask servers that support it to deliver a final usage chunk.
@@ -152,11 +170,15 @@ class ChatCompletionClient:
                     continue
                 r.raise_for_status()
                 if self.stream:
-                    content, usage = self._consume_stream(r)
+                    content, usage, tool_calls, finish_reason = self._consume_stream(r)
                 else:
                     data = r.json()
-                    content = data["choices"][0]["message"]["content"]
+                    choice = data["choices"][0]
+                    message = choice.get("message") or {}
+                    content = message.get("content") or ""
                     usage = data.get("usage") or {}
+                    tool_calls = _parse_tool_calls_from_message(message.get("tool_calls"))
+                    finish_reason = choice.get("finish_reason")
             except retryable as exc:
                 if attempt == attempts:
                     log.error(
@@ -178,13 +200,22 @@ class ChatCompletionClient:
                 continue
             latency = time.monotonic() - started
             log.info(
-                "LLM call ok in %.1fs (prompt=%s, completion=%s, stream=%s)",
+                "LLM call ok in %.1fs (prompt=%s, completion=%s, stream=%s, "
+                "tool_calls=%d, finish=%s)",
                 latency,
                 usage.get("prompt_tokens"),
                 usage.get("completion_tokens"),
                 self.stream,
+                len(tool_calls),
+                finish_reason,
             )
-            return ChatResult(content=content, usage=usage, latency_seconds=latency)
+            return ChatResult(
+                content=content,
+                usage=usage,
+                latency_seconds=latency,
+                tool_calls=tool_calls,
+                finish_reason=finish_reason,
+            )
         raise RuntimeError("unreachable")  # loop always returns or raises
 
     # Emit a heartbeat log line every PROGRESS_INTERVAL_SECONDS while a stream
@@ -203,7 +234,9 @@ class ChatCompletionClient:
     REASONING_FLUSH_CHARS = 400
 
     @classmethod
-    def _consume_stream(cls, r: "requests.Response") -> tuple[str, dict[str, Any]]:
+    def _consume_stream(
+        cls, r: "requests.Response"
+    ) -> tuple[str, dict[str, Any], list[ToolCall], Optional[str]]:
         """Parse an OpenAI-style SSE chat-completions stream.
 
         Each event is a `data: {json}` line; the terminal event is `data: [DONE]`.
@@ -232,6 +265,11 @@ class ChatCompletionClient:
         reasoning_buffer: list[str] = []
         reasoning_logged_chars = 0
         first_delta_logged = False
+        # Tool calls stream as a list of partial dicts addressed by index;
+        # each chunk may bring an id, function.name, or a slice of
+        # function.arguments that we concatenate.
+        tool_call_parts: dict[int, dict[str, Any]] = {}
+        finish_reason: Optional[str] = None
         stream_started = time.monotonic()
         last_progress = stream_started
         try:
@@ -265,7 +303,14 @@ class ChatCompletionClient:
                     usage = chunk_usage
                 choices = event.get("choices") or []
                 if choices:
-                    delta = choices[0].get("delta") or {}
+                    choice = choices[0]
+                    if choice.get("finish_reason"):
+                        finish_reason = choice["finish_reason"]
+                    delta = choice.get("delta") or {}
+                    streamed_tool_calls = delta.get("tool_calls")
+                    if isinstance(streamed_tool_calls, list):
+                        for tc in streamed_tool_calls:
+                            cls._merge_tool_call_chunk(tool_call_parts, tc)
                     if not first_delta_logged and delta:
                         log.info(
                             "LLM first delta keys=%s sample=%s",
@@ -311,15 +356,18 @@ class ChatCompletionClient:
         if len(joined_reasoning) > reasoning_logged_chars:
             tail = joined_reasoning[reasoning_logged_chars:]
             log.info("LLM reasoning >> %s", cls._compact(tail))
+        tool_calls = cls._finalize_tool_calls(tool_call_parts)
         log.info(
             "LLM stream complete: %.1fs elapsed, %d events, %d content chars, "
-            "delta fields=%s",
+            "tool_calls=%d, finish=%s, delta fields=%s",
             time.monotonic() - stream_started,
             events,
             chars,
+            len(tool_calls),
+            finish_reason,
             cls._format_field_counts(delta_field_chars),
         )
-        return "".join(parts), usage
+        return "".join(parts), usage, tool_calls, finish_reason
 
     @staticmethod
     def _format_field_counts(counts: dict[str, int]) -> str:
@@ -337,3 +385,65 @@ class ChatCompletionClient:
         """Collapse whitespace/newlines so a multi-line reasoning chunk fits
         on a single log line, keeping the action's console output readable."""
         return " ".join(text.split())
+
+    @staticmethod
+    def _merge_tool_call_chunk(
+        parts: dict[int, dict[str, Any]], chunk: dict[str, Any]
+    ) -> None:
+        """Accumulate a streamed tool_call delta into ``parts``.
+
+        OpenAI streams tool calls one chunk at a time keyed by ``index``;
+        each chunk may set ``id`` and the ``function.name`` once, and
+        contributes a slice of ``function.arguments`` that we concatenate.
+        Defensive against missing fields — some providers omit ``index``
+        on the very first chunk."""
+        idx = chunk.get("index")
+        if not isinstance(idx, int):
+            idx = len(parts)
+        slot = parts.setdefault(idx, {"id": None, "name": None, "arguments": ""})
+        if chunk.get("id"):
+            slot["id"] = chunk["id"]
+        fn = chunk.get("function") or {}
+        if fn.get("name"):
+            slot["name"] = fn["name"]
+        args_piece = fn.get("arguments")
+        if isinstance(args_piece, str):
+            slot["arguments"] += args_piece
+
+    @staticmethod
+    def _finalize_tool_calls(parts: dict[int, dict[str, Any]]) -> list[ToolCall]:
+        out: list[ToolCall] = []
+        for idx in sorted(parts):
+            slot = parts[idx]
+            name = slot.get("name") or ""
+            if not name:
+                # Stream produced a tool_calls slot with no function name —
+                # nothing useful we can do with it; drop quietly.
+                continue
+            out.append(
+                ToolCall(
+                    id=slot.get("id") or f"call_{idx}",
+                    name=name,
+                    arguments=slot.get("arguments") or "",
+                )
+            )
+        return out
+
+
+def _parse_tool_calls_from_message(raw: Any) -> list[ToolCall]:
+    """Build ToolCall objects from the non-streaming ``message.tool_calls``."""
+    if not isinstance(raw, list):
+        return []
+    out: list[ToolCall] = []
+    for i, tc in enumerate(raw):
+        if not isinstance(tc, dict):
+            continue
+        fn = tc.get("function") or {}
+        name = fn.get("name")
+        if not isinstance(name, str) or not name:
+            continue
+        args = fn.get("arguments")
+        if not isinstance(args, str):
+            args = json.dumps(args) if args is not None else ""
+        out.append(ToolCall(id=tc.get("id") or f"call_{i}", name=name, arguments=args))
+    return out

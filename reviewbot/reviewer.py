@@ -2,14 +2,15 @@ import json
 import logging
 import re
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Optional
 
 from .config import Config
 from .context_script import run_context_script
 from .github_client import GitHubClient
-from .llm_client import ChatCompletionClient, ChatResult
+from .llm_client import ChatCompletionClient, ChatResult, ToolCall
 from .patch import ParsedFile, parse_patch
 from .prompts import build_system_prompt, build_user_prompt
+from .tools import TOOL_SPECS, ToolEnv, run_tool
 
 log = logging.getLogger(__name__)
 
@@ -101,13 +102,154 @@ def _validate_comments(
     return valid, rejected
 
 
-def _format_metrics(chat: ChatResult) -> str:
-    parts = [f"{chat.latency_seconds:.1f}s"]
-    if chat.prompt_tokens is not None or chat.completion_tokens is not None:
-        parts.append(
-            f"{chat.prompt_tokens or '?'} in / {chat.completion_tokens or '?'} out tokens"
-        )
+@dataclass
+class _AggregateMetrics:
+    """Accumulated stats across all LLM turns in one agentic loop."""
+    turns: int = 0
+    tool_calls: int = 0
+    latency_seconds: float = 0.0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+
+
+def _format_aggregated_metrics(m: "_AggregateMetrics") -> str:
+    parts = [
+        f"{m.turns} LLM turn{'s' if m.turns != 1 else ''}",
+        f"{m.tool_calls} tool call{'s' if m.tool_calls != 1 else ''}",
+        f"{m.latency_seconds:.1f}s",
+    ]
+    if m.prompt_tokens or m.completion_tokens:
+        parts.append(f"{m.prompt_tokens or '?'} in / {m.completion_tokens or '?'} out tokens")
     return " · ".join(parts)
+
+
+def _make_tool_env(cfg: Config) -> Optional[ToolEnv]:
+    if not cfg.repo_checkout_path:
+        return None
+    try:
+        env = ToolEnv(repo_root=cfg.repo_checkout_path)
+    except Exception:
+        log.exception("repo checkout path invalid; running without browse tools")
+        return None
+    log.info("Browse tools enabled, rooted at %s", env.repo_root)
+    return env
+
+
+def _run_agentic_loop(
+    llm: ChatCompletionClient,
+    initial_messages: list[dict[str, Any]],
+    *,
+    cfg: Config,
+    tool_env: Optional[ToolEnv],
+) -> tuple[ChatResult, _AggregateMetrics]:
+    """Run a tool-augmented chat loop until the model emits a final
+    (non-tool) response, falling back to a final non-tool turn if the
+    iteration budget is exhausted.
+
+    Returns the *last* ChatResult (whose ``content`` carries the JSON
+    review) and an aggregate-metrics struct."""
+    messages = list(initial_messages)
+    metrics = _AggregateMetrics()
+    tools_arg = TOOL_SPECS if tool_env is not None else None
+
+    for iteration in range(1, cfg.tool_max_iterations + 1):
+        log.info("Agent loop iteration %d/%d", iteration, cfg.tool_max_iterations)
+        chat = llm.complete(
+            messages,
+            response_format={"type": "json_object"},
+            max_tokens=cfg.llm_max_tokens,
+            tools=tools_arg,
+        )
+        metrics.turns += 1
+        metrics.latency_seconds += chat.latency_seconds
+        if chat.prompt_tokens is not None:
+            metrics.prompt_tokens += chat.prompt_tokens
+        if chat.completion_tokens is not None:
+            metrics.completion_tokens += chat.completion_tokens
+
+        if not chat.tool_calls:
+            return chat, metrics
+
+        if tool_env is None:
+            # Model emitted tool calls even though we didn't pass tools —
+            # ignore them and treat the textual content as the answer.
+            log.warning(
+                "Model emitted %d tool_call(s) but tools are disabled; using "
+                "content as final answer",
+                len(chat.tool_calls),
+            )
+            return chat, metrics
+
+        # Append the assistant's tool_calls turn so the next request has
+        # the full conversation, then execute each call and append the
+        # results as `tool` messages.
+        messages.append({
+            "role": "assistant",
+            "content": chat.content or None,
+            "tool_calls": [
+                {
+                    "id": tc.id,
+                    "type": "function",
+                    "function": {"name": tc.name, "arguments": tc.arguments},
+                }
+                for tc in chat.tool_calls
+            ],
+        })
+        for tc in chat.tool_calls:
+            metrics.tool_calls += 1
+            result = _execute_tool_call(tool_env, tc)
+            messages.append({
+                "role": "tool",
+                "tool_call_id": tc.id,
+                "content": result,
+            })
+
+    # Iteration budget hit — force a final answer with tools disabled.
+    log.warning(
+        "Tool budget (%d) exhausted; asking model for a final review without tools",
+        cfg.tool_max_iterations,
+    )
+    messages.append({
+        "role": "user",
+        "content": (
+            "You have used all available tool calls. Based on what you have "
+            "already gathered, produce the final JSON review now. Do not "
+            "request any more tools."
+        ),
+    })
+    chat = llm.complete(
+        messages,
+        response_format={"type": "json_object"},
+        max_tokens=cfg.llm_max_tokens,
+    )
+    metrics.turns += 1
+    metrics.latency_seconds += chat.latency_seconds
+    if chat.prompt_tokens is not None:
+        metrics.prompt_tokens += chat.prompt_tokens
+    if chat.completion_tokens is not None:
+        metrics.completion_tokens += chat.completion_tokens
+    return chat, metrics
+
+
+def _execute_tool_call(env: ToolEnv, tc: ToolCall) -> str:
+    """Parse the model's tool arguments and dispatch. Always returns a
+    string — errors are surfaced to the model rather than raised."""
+    try:
+        args = json.loads(tc.arguments) if tc.arguments else {}
+    except json.JSONDecodeError as exc:
+        log.warning("tool %s emitted unparseable arguments: %s", tc.name, exc)
+        return f"error: arguments were not valid JSON: {exc}"
+    if not isinstance(args, dict):
+        return f"error: arguments must be a JSON object, got {type(args).__name__}"
+    log.info("tool call: %s(%s)", tc.name, _summarize_args(args))
+    output = run_tool(env, tc.name, args)
+    log.info("tool call %s returned %d chars", tc.name, len(output))
+    return output
+
+
+def _summarize_args(args: dict[str, Any], limit: int = 200) -> str:
+    s = json.dumps(args, ensure_ascii=False, default=str)
+    return s if len(s) <= limit else s[:limit] + "..."
 
 
 def _load_review_rules(gh: GitHubClient, owner: str, repo: str, pr: dict, cfg: Config) -> str:
@@ -192,15 +334,17 @@ def run_review(cfg: Config, gh: GitHubClient, req: ReviewRequest) -> None:
         extra_context=extra_context,
     )
 
-    chat = llm.complete(
+    tool_env = _make_tool_env(cfg)
+    chat, total_metrics = _run_agentic_loop(
+        llm,
         [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        response_format={"type": "json_object"},
-        max_tokens=cfg.llm_max_tokens,
+        cfg=cfg,
+        tool_env=tool_env,
     )
-    metrics_line = _format_metrics(chat)
+    metrics_line = _format_aggregated_metrics(total_metrics)
 
     try:
         result = _extract_json(chat.content)
