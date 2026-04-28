@@ -11,10 +11,10 @@ import logging
 import os
 import sys
 
-from config import Config
-from github_client import GitHubClient
-from reviewer import run_review
-from triggers import build_review_request
+from .config import Config
+from .github_client import GitHubClient
+from .reviewer import run_review
+from .triggers import build_review_request
 
 
 def main() -> int:

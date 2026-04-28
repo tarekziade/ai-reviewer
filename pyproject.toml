@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reviewbot"
+version = "0.1.0"
+description = "GitHub-native AI code reviewer for any OpenAI-compatible LLM."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Tarek Ziadé" }]
+classifiers = [
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Topic :: Software Development :: Quality Assurance",
+]
+dependencies = [
+  "flask>=3.0",
+  "requests>=2.31",
+  "pyjwt[crypto]>=2.8",
+  "gunicorn>=21.2",
+]
+
+[project.scripts]
+reviewbot-action = "reviewbot.action_runner:main"
+reviewbot-app = "reviewbot.app:main"
+
+[tool.setuptools.packages.find]
+include = ["reviewbot*"]
+exclude = ["tests*"]

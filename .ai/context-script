@@ -28,39 +28,40 @@ def main() -> int:
 
     notes: list[str] = []
 
-    if "prompts.py" in paths:
+    if "reviewbot/prompts.py" in paths:
         notes.append(
-            "- `prompts.py` was modified. Prompt templates govern reviewer "
-            "behavior and contain the IMMUTABLE CONSTRAINTS / anti-injection "
-            "language. Watch for: weakened security wording, removed JSON "
-            "schema constraints, or template variable mismatches that would "
-            "raise KeyError at format time."
+            "- `reviewbot/prompts.py` was modified. Prompt templates govern "
+            "reviewer behavior and contain the IMMUTABLE CONSTRAINTS / "
+            "anti-injection language. Watch for: weakened security wording, "
+            "removed JSON schema constraints, or template variable mismatches "
+            "that would raise KeyError at format time."
         )
 
-    if "triggers.py" in paths:
+    if "reviewbot/triggers.py" in paths:
         notes.append(
-            "- `triggers.py` was modified. This is the trust boundary that "
-            "decides who can invoke the reviewer. Verify author_association "
-            "checks (MEMBER/OWNER/COLLABORATOR), PR-state checks, and "
-            "trigger-phrase matching are unchanged or intentionally tightened "
-            "— never loosened."
+            "- `reviewbot/triggers.py` was modified. This is the trust "
+            "boundary that decides who can invoke the reviewer. Verify "
+            "author_association checks (MEMBER/OWNER/COLLABORATOR), "
+            "PR-state checks, and trigger-phrase matching are unchanged "
+            "or intentionally tightened — never loosened."
         )
 
-    if "patch.py" in paths:
+    if "reviewbot/patch.py" in paths:
         notes.append(
-            "- `patch.py` was modified. Diff parsing feeds inline-comment "
-            "line anchoring; off-by-one bugs cause comments to attach to the "
-            "wrong line or be silently dropped by `_validate_comments`."
+            "- `reviewbot/patch.py` was modified. Diff parsing feeds "
+            "inline-comment line anchoring; off-by-one bugs cause comments "
+            "to attach to the wrong line or be silently dropped by "
+            "`_validate_comments`."
         )
 
-    if "github_client.py" in paths:
+    if "reviewbot/github_client.py" in paths:
         notes.append(
-            "- `github_client.py` was modified. Verify endpoints, HTTP verbs, "
-            "pagination, and that error handling does not silently swallow "
-            "auth, 404, or rate-limit failures."
+            "- `reviewbot/github_client.py` was modified. Verify endpoints, "
+            "HTTP verbs, pagination, and that error handling does not "
+            "silently swallow auth, 404, or rate-limit failures."
         )
 
-    if "context_script.py" in paths or ".ai/context-script" in paths:
+    if "reviewbot/context_script.py" in paths or ".ai/context-script" in paths:
         notes.append(
             "- The context-script feature itself was touched. This script "
             "runs untrusted-ish code from the repo and pipes its output into "
@@ -68,11 +69,11 @@ def main() -> int:
             "handling, and that failures degrade gracefully (None, never raise)."
         )
 
-    if "requirements.txt" in paths:
+    if "pyproject.toml" in paths:
         notes.append(
-            "- `requirements.txt` changed. Check for unpinned versions, "
-            "unnecessary additions, and whether each new dep is genuinely "
-            "needed at runtime (vs dev/test only)."
+            "- `pyproject.toml` changed. Check for unpinned versions, "
+            "unnecessary deps, and that any new console-script entry points "
+            "or extras are reflected in `action.yml` and the README."
         )
 
     if "action.yml" in paths:
@@ -88,10 +89,15 @@ def main() -> int:
             "- `.ai/review-rules.md` changed. These rules govern the "
             "reviewer's own behavior on this repo; sanity-check that they "
             "still produce focused, scoped feedback and don't conflict with "
-            "the IMMUTABLE CONSTRAINTS in `prompts.py`."
+            "the IMMUTABLE CONSTRAINTS in `reviewbot/prompts.py`."
         )
 
-    core = {"reviewer.py", "patch.py", "triggers.py", "context_script.py"}
+    core = {
+        "reviewbot/reviewer.py",
+        "reviewbot/patch.py",
+        "reviewbot/triggers.py",
+        "reviewbot/context_script.py",
+    }
     touched_core = sorted(core & paths)
     test_changes = any(p.startswith("tests/") for p in paths)
     if touched_core and not test_changes:
@@ -101,7 +107,7 @@ def main() -> int:
             "or if a regression test is warranted."
         )
 
-    entrypoints = {"app.py", "action_runner.py"}
+    entrypoints = {"reviewbot/app.py", "reviewbot/action_runner.py"}
     touched_entry = entrypoints & paths
     if touched_entry and not (entrypoints <= paths):
         only = next(iter(touched_entry))

@@ -1,6 +1,6 @@
 from typing import Optional
 
-from reviewer import ReviewRequest
+from .reviewer import ReviewRequest
 
 
 def build_review_request(

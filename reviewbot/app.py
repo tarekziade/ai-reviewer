@@ -6,11 +6,11 @@ import threading
 
 from flask import Flask, abort, jsonify, request
 
-from config import Config
-from github_auth import installation_token
-from github_client import GitHubClient
-from reviewer import ReviewRequest, run_review
-from triggers import build_review_request
+from .config import Config
+from .github_auth import installation_token
+from .github_client import GitHubClient
+from .reviewer import ReviewRequest, run_review
+from .triggers import build_review_request
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
@@ -77,5 +77,12 @@ def webhook() -> tuple:
     return jsonify({"status": "accepted"}), 202
 
 
-if __name__ == "__main__":
+def main() -> int:
+    """Console entry point — runs Flask's dev server. Production deployments
+    should use a real WSGI server, e.g. `gunicorn reviewbot.app:app`."""
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8080")))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

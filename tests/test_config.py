@@ -2,7 +2,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from config import Config
+from reviewbot.config import Config
 
 
 class ConfigTests(unittest.TestCase):

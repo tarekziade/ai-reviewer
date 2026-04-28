@@ -1,21 +1,14 @@
 import json
-import sys
-import types
 import unittest
 from unittest.mock import Mock, patch
 
-requests_stub = types.ModuleType("requests")
-requests_stub.get = lambda *args, **kwargs: None
-requests_stub.post = lambda *args, **kwargs: None
-sys.modules.setdefault("requests", requests_stub)
-
-from llm_client import ChatCompletionClient
+from reviewbot.llm_client import ChatCompletionClient
 
 
 class ChatCompletionClientTests(unittest.TestCase):
     def test_complete_uses_explicit_model_without_discovery(self) -> None:
-        with patch("llm_client.requests.get") as mock_get, patch(
-            "llm_client.requests.post"
+        with patch("reviewbot.llm_client.requests.get") as mock_get, patch(
+            "reviewbot.llm_client.requests.post"
         ) as mock_post:
             mock_post.return_value = Mock(
                 status_code=200,
@@ -32,8 +25,8 @@ class ChatCompletionClientTests(unittest.TestCase):
         self.assertEqual(payload["model"], "fixed-model")
 
     def test_complete_discovers_first_model_once(self) -> None:
-        with patch("llm_client.requests.get") as mock_get, patch(
-            "llm_client.requests.post"
+        with patch("reviewbot.llm_client.requests.get") as mock_get, patch(
+            "reviewbot.llm_client.requests.post"
         ) as mock_post:
             mock_get.return_value = Mock(
                 ok=True,
@@ -66,8 +59,8 @@ class ChatCompletionClientTests(unittest.TestCase):
         self.assertEqual(second_payload["model"], "auto-model")
 
     def test_complete_adds_v1_when_base_is_unversioned(self) -> None:
-        with patch("llm_client.requests.get") as mock_get, patch(
-            "llm_client.requests.post"
+        with patch("reviewbot.llm_client.requests.get") as mock_get, patch(
+            "reviewbot.llm_client.requests.post"
         ) as mock_post:
             mock_get.return_value = Mock(
                 ok=True,
@@ -100,8 +93,8 @@ class ChatCompletionClientTests(unittest.TestCase):
         )
 
     def test_complete_sends_bill_to_header_when_configured(self) -> None:
-        with patch("llm_client.requests.get") as mock_get, patch(
-            "llm_client.requests.post"
+        with patch("reviewbot.llm_client.requests.get") as mock_get, patch(
+            "reviewbot.llm_client.requests.post"
         ) as mock_post:
             mock_post.return_value = Mock(
                 status_code=200,
@@ -120,8 +113,8 @@ class ChatCompletionClientTests(unittest.TestCase):
         )
 
     def test_complete_omits_bill_to_header_when_not_configured(self) -> None:
-        with patch("llm_client.requests.get"), patch(
-            "llm_client.requests.post"
+        with patch("reviewbot.llm_client.requests.get"), patch(
+            "reviewbot.llm_client.requests.post"
         ) as mock_post:
             mock_post.return_value = Mock(
                 status_code=200,
@@ -145,8 +138,8 @@ class ChatCompletionClientTests(unittest.TestCase):
             json=Mock(return_value={"choices": [{"message": {"content": "ok"}}]}),
             raise_for_status=Mock(),
         )
-        with patch("llm_client.time.sleep"), patch(
-            "llm_client.requests.post", side_effect=[flaky, ok]
+        with patch("reviewbot.llm_client.time.sleep"), patch(
+            "reviewbot.llm_client.requests.post", side_effect=[flaky, ok]
         ) as mock_post:
             client = ChatCompletionClient("https://example.com/v1", "token", "fixed-model")
             result = client.complete([{"role": "user", "content": "hi"}])
@@ -161,7 +154,7 @@ class ChatCompletionClientTests(unittest.TestCase):
             'data: {"choices":[{"delta":{}}],"usage":{"prompt_tokens":3,"completion_tokens":2}}',
             "data: [DONE]",
         ]
-        with patch("llm_client.requests.post") as mock_post:
+        with patch("reviewbot.llm_client.requests.post") as mock_post:
             mock_post.return_value = Mock(
                 status_code=200,
                 raise_for_status=Mock(),
@@ -182,8 +175,8 @@ class ChatCompletionClientTests(unittest.TestCase):
         self.assertTrue(mock_post.call_args.kwargs["stream"])
 
     def test_complete_raises_when_discovery_returns_no_models(self) -> None:
-        with patch("llm_client.requests.get") as mock_get, patch(
-            "llm_client.requests.post"
+        with patch("reviewbot.llm_client.requests.get") as mock_get, patch(
+            "reviewbot.llm_client.requests.post"
         ) as mock_post:
             mock_get.return_value = Mock(
                 ok=True,

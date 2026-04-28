@@ -44,7 +44,7 @@ Runs in **two modes** off the same codebase:
         ▼
 ┌───────────────────────┐
 │ Mode 1: Actions runner│   or   ┌──────────────────────┐
-│  - action_runner.py   │        │ Mode 2: Flask app.py │
+│  - reviewbot-action   │        │ Mode 2: reviewbot.app│
 │  - $GITHUB_TOKEN      │        │  - HMAC verify       │
 │  - $GITHUB_EVENT_PATH │        │  - App JWT → token   │
 └───────────┬───────────┘        └──────────┬───────────┘
@@ -267,7 +267,7 @@ install the App on the repositories you want reviewed.
 git clone https://github.com/tarekziade/ai-reviewer.git
 cd ai-reviewer
 python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+pip install .
 
 cp .env.example .env
 $EDITOR .env
@@ -290,16 +290,22 @@ Optional variables (same defaults as the Action inputs above):
 
 ### 3. Run
 
+Install the package once:
+
+```bash
+pip install .
+```
+
 Development:
 
 ```bash
-python app.py
+reviewbot-app
 ```
 
 Production:
 
 ```bash
-gunicorn -w 2 -b 0.0.0.0:8080 app:app
+gunicorn -w 2 -b 0.0.0.0:8080 reviewbot.app:app
 ```
 
 Expose the service publicly (HTTPS, stable URL) and point the App's
@@ -315,8 +321,8 @@ Any Python host works. Minimal configurations:
 - **Lambda + API Gateway**: wrap the Flask app with
   [`aws-wsgi`](https://pypi.org/project/aws-wsgi/) or Mangum-style
   shim; cold start is ~1–2s (fine for GitHub's 10s webhook timeout).
-- **VM / systemd**: `gunicorn -w 2 -b 127.0.0.1:8080 app:app` behind
-  nginx/caddy.
+- **VM / systemd**: `gunicorn -w 2 -b 127.0.0.1:8080 reviewbot.app:app`
+  behind nginx/caddy.
 
 ---
 
@@ -384,19 +390,27 @@ rewrite the rules as part of their PR.
 ## Project layout
 
 ```
-action.yml         Composite Action manifest (Mode 1)
-action_runner.py   Action entry point — reads $GITHUB_EVENT_PATH
-app.py             Flask webhook server (Mode 2)
-triggers.py        Shared "should we review?" gating
-config.py          Env-driven config, App creds optional
-github_auth.py     App JWT + installation token (Mode 2 only)
-github_client.py   REST wrapper: PRs, files, contents, reviews
-llm_client.py      OpenAI-compatible chat-completions client
-patch.py           Unified diff parser + line annotator
-prompts.py         System / user prompt templates
-reviewer.py        Orchestration + JSON parsing + comment validation
-requirements.txt   Python deps (Flask only needed for Mode 2)
-.env.example       Env template for Mode 2
+action.yml                       Composite Action manifest (Mode 1)
+pyproject.toml                   Package metadata, deps, console scripts
+.env.example                     Env template for Mode 2
+.ai/review-rules.md              Repo-specific review guidance
+.ai/context-script               Optional repo-supplied context hook
+reviewbot/
+  action_runner.py   Action entry point — reads $GITHUB_EVENT_PATH
+                     (console script: `reviewbot-action`)
+  app.py             Flask webhook server (Mode 2)
+                     (console script: `reviewbot-app`,
+                      gunicorn target: `reviewbot.app:app`)
+  triggers.py        Shared "should we review?" gating
+  config.py          Env-driven config, App creds optional
+  github_auth.py     App JWT + installation token (Mode 2 only)
+  github_client.py   REST wrapper: PRs, files, contents, reviews
+  llm_client.py      OpenAI-compatible chat-completions client
+  patch.py           Unified diff parser + line annotator
+  prompts.py         System / user prompt templates
+  context_script.py  Runs `.ai/context-script`, captures stdout
+  reviewer.py        Orchestration + JSON parsing + comment validation
+tests/                           unittest-based test suite
 ```
 
 ---

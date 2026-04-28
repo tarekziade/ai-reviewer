@@ -72,9 +72,9 @@ runs:
       with:
         python-version: ${{ inputs.python_version }}
 
-    - name: Install dependencies
+    - name: Install reviewbot
       shell: bash
-      run: pip install --disable-pip-version-check -r "${{ github.action_path }}/requirements.txt"
+      run: pip install --disable-pip-version-check "${{ github.action_path }}"
 
     - name: Run AI reviewer
       shell: bash
@@ -93,4 +93,4 @@ runs:
         DEFAULT_REVIEW_RULES: ${{ inputs.default_review_rules }}
         CONTEXT_SCRIPT_PATH: ${{ inputs.context_script_path }}
         CONTEXT_SCRIPT_TIMEOUT: ${{ inputs.context_script_timeout }}
-      run: python "${{ github.action_path }}/action_runner.py"
+      run: reviewbot-action

@@ -1,13 +1,6 @@
-import sys
-import types
 import unittest
 
-requests_stub = types.ModuleType("requests")
-requests_stub.get = lambda *args, **kwargs: None
-requests_stub.post = lambda *args, **kwargs: None
-sys.modules.setdefault("requests", requests_stub)
-
-from triggers import build_review_request
+from reviewbot.triggers import build_review_request
 
 
 class TriggerTests(unittest.TestCase):

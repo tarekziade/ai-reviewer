@@ -4,12 +4,12 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from config import Config
-from context_script import run_context_script
-from github_client import GitHubClient
-from llm_client import ChatCompletionClient, ChatResult
-from patch import ParsedFile, parse_patch
-from prompts import build_system_prompt, build_user_prompt
+from .config import Config
+from .context_script import run_context_script
+from .github_client import GitHubClient
+from .llm_client import ChatCompletionClient, ChatResult
+from .patch import ParsedFile, parse_patch
+from .prompts import build_system_prompt, build_user_prompt
 
 log = logging.getLogger(__name__)
 

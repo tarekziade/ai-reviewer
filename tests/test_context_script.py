@@ -4,7 +4,7 @@ import tempfile
 import textwrap
 import unittest
 
-from context_script import run_context_script
+from reviewbot.context_script import run_context_script
 
 
 def _write_script(dir_: str, body: str, *, executable: bool = True, name: str = "ctx") -> str:
