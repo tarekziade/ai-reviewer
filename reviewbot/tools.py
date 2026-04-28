@@ -19,6 +19,9 @@ import re
 import subprocess
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
+
+import requests
 
 log = logging.getLogger(__name__)
 
@@ -41,6 +44,19 @@ DENY_DIR_NAMES = frozenset(
     {".git", "node_modules", "__pycache__", ".venv", "venv", ".mypy_cache",
      ".pytest_cache", ".ruff_cache", "dist", "build"}
 )
+
+# Hosts the model is allowed to fetch via ``fetch_url``. Kept narrow on
+# purpose: the goal is letting it verify Hugging Face paper/model/dataset
+# links cited in PR docs, not arbitrary outbound HTTP from the runner.
+ALLOWED_FETCH_HOSTS = frozenset({"huggingface.co"})
+
+# Cap on the response body returned to the model. Same rationale as
+# MAX_TOOL_OUTPUT_CHARS — and a model card / paper page is huge.
+MAX_FETCH_BODY_CHARS = 4000
+
+# Network timeout for fetch_url. Shorter than the LLM streaming budget
+# so a slow URL doesn't delay an iteration much.
+FETCH_TIMEOUT_SECONDS = 10
 
 
 TOOL_SPECS: list[dict[str, Any]] = [
@@ -101,6 +117,31 @@ TOOL_SPECS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "fetch_url",
+            "description": (
+                "Fetch a URL on huggingface.co to verify it resolves and read "
+                "its content. Only https://huggingface.co/... URLs are allowed; "
+                "other hosts return an error. Use this to check that paper, "
+                "model, or dataset links cited in the diff actually exist "
+                "before flagging them as typos. Returns the HTTP status line, "
+                "content-type, and the first ~4KB of body."
+            ),
+            "parameters": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "url": {
+                        "type": "string",
+                        "description": "Full URL, e.g. https://huggingface.co/papers/2403.09611",
+                    },
+                },
+                "required": ["url"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "grep",
             "description": (
                 "Search for a regex pattern across the checked-out PR head "
@@ -155,6 +196,8 @@ def run_tool(env: ToolEnv, name: str, arguments: dict[str, Any]) -> str:
             return _list_dir(env, arguments)
         if name == "grep":
             return _grep(env, arguments)
+        if name == "fetch_url":
+            return _fetch_url(arguments)
         return f"error: unknown tool {name!r}"
     except _ToolError as exc:
         return f"error: {exc}"
@@ -298,3 +341,51 @@ def _grep(env: ToolEnv, args: dict[str, Any]) -> str:
     suffix = f"showing {len(lines)} of {len(lines)}+ matches" if truncated else ""
     header = f"git grep -E {pattern!r} -- {rel_pathspec}:"
     return _truncate(f"{header}\n{body}", suffix_note=suffix)
+
+
+def _fetch_url(args: dict[str, Any]) -> str:
+    raw = args.get("url")
+    if not isinstance(raw, str) or not raw:
+        raise _ToolError("url must be a non-empty string")
+    parsed = urlparse(raw)
+    if parsed.scheme != "https":
+        raise _ToolError("only https URLs are allowed")
+    host = (parsed.hostname or "").lower()
+    if host not in ALLOWED_FETCH_HOSTS:
+        raise _ToolError(
+            f"host {host!r} is not in the allowlist; only "
+            f"{sorted(ALLOWED_FETCH_HOSTS)} are permitted"
+        )
+    # Disable redirects so a 30x doesn't smuggle us off-host. The model
+    # can re-call with the redirect target if it's still on the allowlist.
+    try:
+        r = requests.get(
+            raw,
+            timeout=FETCH_TIMEOUT_SECONDS,
+            allow_redirects=False,
+            headers={"User-Agent": "ai-reviewer/1.0 (link verification)"},
+        )
+    except requests.Timeout as exc:
+        raise _ToolError(
+            f"fetch timed out after {FETCH_TIMEOUT_SECONDS}s"
+        ) from exc
+    except requests.RequestException as exc:
+        raise _ToolError(f"fetch failed: {exc}") from exc
+
+    header_lines = [f"HTTP {r.status_code} {r.reason}", f"URL: {raw}"]
+    ct = r.headers.get("Content-Type")
+    if ct:
+        header_lines.append(f"Content-Type: {ct}")
+    if r.is_redirect or r.status_code in (301, 302, 303, 307, 308):
+        loc = r.headers.get("Location", "")
+        header_lines.append(f"Location: {loc}")
+    # Skip body for non-text responses; the model only needs to know
+    # the link resolves.
+    if ct and not (ct.startswith("text/") or "json" in ct or "xml" in ct):
+        body = f"(non-text body, {len(r.content)} bytes; not shown)"
+    else:
+        text = r.text or ""
+        body = text[:MAX_FETCH_BODY_CHARS]
+        if len(text) > MAX_FETCH_BODY_CHARS:
+            body += f"\n[... truncated; full body was {len(text)} chars ...]"
+    return _truncate("\n".join(header_lines) + "\n\n" + body)

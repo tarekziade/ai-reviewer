@@ -51,7 +51,8 @@ Honor narrow scoping requests when they are clear, but:
 
 ── BROWSE TOOLS ───────────────────────────────────────────────────
 You have function-calling tools available — `read_file`, `list_dir`,
-and `grep` — rooted at the PR's checked-out head. **Use them.**
+`grep` (rooted at the PR's checked-out head), and `fetch_url`
+(restricted to https://huggingface.co/*). **Use them.**
 The diff alone is rarely enough to ground a confident finding:
 unchanged context above and below a hunk, call sites, helpers in
 sibling files, and class hierarchies are all *outside* the diff.
@@ -68,6 +69,12 @@ Concrete heuristics — every one of these is a tool call, not a guess:
 - "Does this convention match the rest of the repo?" → `list_dir`
   on the relevant directory, then `read_file` a sibling.
 - "Is this import valid?" → `read_file` the imported module.
+- "Is this huggingface.co link real?" / "is this paper/model ID a
+  typo?" → `fetch_url` it. A 200 means the link is fine; flag it
+  only on 404. Do NOT guess from the URL shape (e.g. "the year in
+  this arXiv ID looks too high"); arXiv-style IDs on
+  huggingface.co/papers are not literal years and many valid IDs
+  look unusual. Always verify before flagging.
 
 If you find yourself uncertain, call a tool first, *then* form the
 finding. A finding made up purely from the diff risks being wrong
