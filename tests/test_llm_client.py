@@ -2,7 +2,18 @@ import json
 import unittest
 from unittest.mock import Mock, patch
 
+import requests
+
 from reviewbot.llm_client import ChatCompletionClient
+
+
+def _interrupted_iter_lines(prefix_lines: list[str], exc: Exception):
+    def gen(*_args, **_kwargs):
+        for line in prefix_lines:
+            yield line
+        raise exc
+
+    return gen
 
 
 class ChatCompletionClientTests(unittest.TestCase):
@@ -173,6 +184,57 @@ class ChatCompletionClientTests(unittest.TestCase):
         self.assertTrue(payload["stream"])
         self.assertEqual(payload["stream_options"], {"include_usage": True})
         self.assertTrue(mock_post.call_args.kwargs["stream"])
+
+    def test_complete_retries_on_stream_interruption_then_succeeds(self) -> None:
+        sse_full = [
+            'data: {"choices":[{"delta":{"content":"he"}}]}',
+            'data: {"choices":[{"delta":{"content":"llo"}}]}',
+            "data: [DONE]",
+        ]
+        flaky = Mock(
+            status_code=200,
+            raise_for_status=Mock(),
+            iter_lines=_interrupted_iter_lines(
+                [sse_full[0]],
+                requests.exceptions.ChunkedEncodingError("Response ended prematurely"),
+            ),
+        )
+        ok = Mock(
+            status_code=200,
+            raise_for_status=Mock(),
+            iter_lines=Mock(return_value=iter(sse_full)),
+        )
+        with patch("reviewbot.llm_client.time.sleep"), patch(
+            "reviewbot.llm_client.requests.post", side_effect=[flaky, ok]
+        ) as mock_post:
+            client = ChatCompletionClient(
+                "https://example.com/v1", "token", "fixed-model", stream=True
+            )
+            result = client.complete([{"role": "user", "content": "hi"}])
+
+        self.assertEqual(result.content, "hello")
+        self.assertEqual(mock_post.call_count, 2)
+
+    def test_complete_raises_after_exhausting_stream_retries(self) -> None:
+        flaky = lambda: Mock(  # noqa: E731
+            status_code=200,
+            raise_for_status=Mock(),
+            iter_lines=_interrupted_iter_lines(
+                [],
+                requests.exceptions.ChunkedEncodingError("Response ended prematurely"),
+            ),
+        )
+        with patch("reviewbot.llm_client.time.sleep"), patch(
+            "reviewbot.llm_client.requests.post",
+            side_effect=[flaky(), flaky(), flaky()],
+        ) as mock_post:
+            client = ChatCompletionClient(
+                "https://example.com/v1", "token", "fixed-model", stream=True
+            )
+            with self.assertRaises(requests.exceptions.ChunkedEncodingError):
+                client.complete([{"role": "user", "content": "hi"}])
+
+        self.assertEqual(mock_post.call_count, 3)
 
     def test_complete_raises_when_discovery_returns_no_models(self) -> None:
         with patch("reviewbot.llm_client.requests.get") as mock_get, patch(

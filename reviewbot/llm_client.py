@@ -126,6 +126,11 @@ class ChatCompletionClient:
         url = f"{self._api_base_v1()}/chat/completions"
         body = json.dumps(payload)
         attempts = 3
+        retryable = (
+            requests.ConnectionError,
+            requests.Timeout,
+            requests.exceptions.ChunkedEncodingError,
+        )
         started = time.monotonic()
         for attempt in range(1, attempts + 1):
             try:
@@ -136,33 +141,41 @@ class ChatCompletionClient:
                     timeout=300,
                     stream=self.stream,
                 )
-            except (requests.ConnectionError, requests.Timeout) as exc:
+                if r.status_code >= 500 and attempt < attempts:
+                    log.warning(
+                        "LLM call attempt %d/%d returned %d; retrying",
+                        attempt,
+                        attempts,
+                        r.status_code,
+                    )
+                    time.sleep(2**attempt)
+                    continue
+                r.raise_for_status()
+                if self.stream:
+                    content, usage = self._consume_stream(r)
+                else:
+                    data = r.json()
+                    content = data["choices"][0]["message"]["content"]
+                    usage = data.get("usage") or {}
+            except retryable as exc:
                 if attempt == attempts:
+                    log.error(
+                        "LLM call attempt %d/%d failed during %s: %s; giving up",
+                        attempt,
+                        attempts,
+                        "stream" if self.stream else "request",
+                        exc,
+                    )
                     raise
                 log.warning(
-                    "LLM call attempt %d/%d failed: %s; retrying",
+                    "LLM call attempt %d/%d failed during %s: %s; retrying",
                     attempt,
                     attempts,
+                    "stream" if self.stream else "request",
                     exc,
                 )
                 time.sleep(2**attempt)
                 continue
-            if r.status_code >= 500 and attempt < attempts:
-                log.warning(
-                    "LLM call attempt %d/%d returned %d; retrying",
-                    attempt,
-                    attempts,
-                    r.status_code,
-                )
-                time.sleep(2**attempt)
-                continue
-            r.raise_for_status()
-            if self.stream:
-                content, usage = self._consume_stream(r)
-            else:
-                data = r.json()
-                content = data["choices"][0]["message"]["content"]
-                usage = data.get("usage") or {}
             latency = time.monotonic() - started
             log.info(
                 "LLM call ok in %.1fs (prompt=%s, completion=%s, stream=%s)",
@@ -174,35 +187,82 @@ class ChatCompletionClient:
             return ChatResult(content=content, usage=usage, latency_seconds=latency)
         raise RuntimeError("unreachable")  # loop always returns or raises
 
-    @staticmethod
-    def _consume_stream(r: "requests.Response") -> tuple[str, dict[str, Any]]:
+    # Emit a heartbeat log line every PROGRESS_INTERVAL_SECONDS while a stream
+    # is in flight, so the action's console output makes clear that bytes are
+    # still arriving from the LLM (and lets us spot a hang vs a slow stream).
+    PROGRESS_INTERVAL_SECONDS = 10.0
+
+    @classmethod
+    def _consume_stream(cls, r: "requests.Response") -> tuple[str, dict[str, Any]]:
         """Parse an OpenAI-style SSE chat-completions stream.
 
         Each event is a `data: {json}` line; the terminal event is `data: [DONE]`.
         We accumulate `choices[0].delta.content` and capture the trailing `usage`
-        block when the server emits one (requires stream_options.include_usage)."""
+        block when the server emits one (requires stream_options.include_usage).
+
+        Logs a periodic progress line so long-running streams visibly make
+        progress in the action's console output.
+
+        Raises ChunkedEncodingError / ConnectionError if the upstream cuts the
+        connection mid-stream — the outer retry loop in ``complete`` handles
+        these by re-issuing the request.
+        """
         parts: list[str] = []
         usage: dict[str, Any] = {}
-        for raw in r.iter_lines(decode_unicode=True):
-            if not raw:
-                continue
-            if not raw.startswith("data:"):
-                continue
-            chunk = raw[5:].strip()
-            if chunk == "[DONE]":
-                break
-            try:
-                event = json.loads(chunk)
-            except json.JSONDecodeError:
-                log.debug("skipping unparseable stream chunk: %r", chunk[:200])
-                continue
-            chunk_usage = event.get("usage")
-            if isinstance(chunk_usage, dict):
-                usage = chunk_usage
-            choices = event.get("choices") or []
-            if choices:
-                delta = choices[0].get("delta") or {}
-                piece = delta.get("content")
-                if isinstance(piece, str):
-                    parts.append(piece)
+        chars = 0
+        events = 0
+        stream_started = time.monotonic()
+        last_progress = stream_started
+        try:
+            for raw in r.iter_lines(decode_unicode=True):
+                now = time.monotonic()
+                if now - last_progress >= cls.PROGRESS_INTERVAL_SECONDS:
+                    log.info(
+                        "LLM stream progress: %.1fs elapsed, %d events, %d chars",
+                        now - stream_started,
+                        events,
+                        chars,
+                    )
+                    last_progress = now
+                if not raw:
+                    continue
+                if not raw.startswith("data:"):
+                    continue
+                chunk = raw[5:].strip()
+                if chunk == "[DONE]":
+                    break
+                try:
+                    event = json.loads(chunk)
+                except json.JSONDecodeError:
+                    log.debug("skipping unparseable stream chunk: %r", chunk[:200])
+                    continue
+                events += 1
+                chunk_usage = event.get("usage")
+                if isinstance(chunk_usage, dict):
+                    usage = chunk_usage
+                choices = event.get("choices") or []
+                if choices:
+                    delta = choices[0].get("delta") or {}
+                    piece = delta.get("content")
+                    if isinstance(piece, str):
+                        parts.append(piece)
+                        chars += len(piece)
+        except (
+            requests.exceptions.ChunkedEncodingError,
+            requests.ConnectionError,
+        ) as exc:
+            log.warning(
+                "LLM stream interrupted after %.1fs, %d events, %d chars: %s",
+                time.monotonic() - stream_started,
+                events,
+                chars,
+                exc,
+            )
+            raise
+        log.info(
+            "LLM stream complete: %.1fs elapsed, %d events, %d chars",
+            time.monotonic() - stream_started,
+            events,
+            chars,
+        )
         return "".join(parts), usage
