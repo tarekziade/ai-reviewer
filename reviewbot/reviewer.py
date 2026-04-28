@@ -152,11 +152,19 @@ def _run_agentic_loop(
     metrics = _AggregateMetrics()
     tools_arg = TOOL_SPECS if tool_env is not None else None
 
+    # Several inference stacks (Kimi-K2 on HF Router, vLLM with some
+    # tool parsers, etc.) reject `response_format` + `tools` in the same
+    # request. We omit response_format whenever tools are in play and
+    # rely on the system prompt's "output ONLY a single JSON object"
+    # instruction plus _extract_json's forgiving parsing for the final
+    # answer.
+    response_format = None if tools_arg else {"type": "json_object"}
+
     for iteration in range(1, cfg.tool_max_iterations + 1):
         log.info("Agent loop iteration %d/%d", iteration, cfg.tool_max_iterations)
         chat = llm.complete(
             messages,
-            response_format={"type": "json_object"},
+            response_format=response_format,
             max_tokens=cfg.llm_max_tokens,
             tools=tools_arg,
             tool_choice="auto" if tools_arg else None,
