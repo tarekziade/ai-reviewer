@@ -159,6 +159,7 @@ def _run_agentic_loop(
             response_format={"type": "json_object"},
             max_tokens=cfg.llm_max_tokens,
             tools=tools_arg,
+            tool_choice="auto" if tools_arg else None,
         )
         metrics.turns += 1
         metrics.latency_seconds += chat.latency_seconds
@@ -198,9 +199,13 @@ def _run_agentic_loop(
         for tc in chat.tool_calls:
             metrics.tool_calls += 1
             result = _execute_tool_call(tool_env, tc)
+            # Kimi-K2 (and some other engines) require ``name`` on tool
+            # replies; OpenAI's spec ignores it. Always sending it is
+            # the safer cross-provider choice.
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc.id,
+                "name": tc.name,
                 "content": result,
             })
 
