@@ -325,6 +325,66 @@ class ChatCompletionClientTests(unittest.TestCase):
             json.loads(result.tool_calls[0].arguments), {"path": "src"}
         )
 
+    def test_complete_falls_back_when_endpoint_rejects_tools(self) -> None:
+        # First call (with tools) returns 400; second call (no tools) succeeds.
+        rejected = Mock(
+            status_code=400,
+            ok=False,
+            reason="Bad Request",
+            text='{"error":"tools not supported by this model"}',
+            raise_for_status=Mock(side_effect=AssertionError("should not be reached")),
+        )
+        ok = Mock(
+            status_code=200,
+            ok=True,
+            json=Mock(
+                return_value={
+                    "choices": [
+                        {"message": {"content": "ok"}, "finish_reason": "stop"}
+                    ]
+                }
+            ),
+            raise_for_status=Mock(),
+        )
+        with patch("reviewbot.llm_client.time.sleep"), patch(
+            "reviewbot.llm_client.requests.post", side_effect=[rejected, ok]
+        ) as mock_post:
+            client = ChatCompletionClient(
+                "https://example.com/v1", "token", "fixed-model"
+            )
+            result = client.complete(
+                [{"role": "user", "content": "hi"}],
+                tools=[{"type": "function", "function": {"name": "read_file"}}],
+            )
+
+        self.assertEqual(result.content, "ok")
+        # Two POSTs: first with tools, second without.
+        self.assertEqual(mock_post.call_count, 2)
+        first_payload = json.loads(mock_post.call_args_list[0].kwargs["data"])
+        second_payload = json.loads(mock_post.call_args_list[1].kwargs["data"])
+        self.assertIn("tools", first_payload)
+        self.assertNotIn("tools", second_payload)
+
+    def test_complete_does_not_fall_back_on_400_without_tools(self) -> None:
+        # If we never sent tools, a 400 should bubble up — not silently retry.
+        rejected = Mock(
+            status_code=400,
+            ok=False,
+            reason="Bad Request",
+            text='{"error":"bad messages"}',
+            raise_for_status=Mock(side_effect=requests.HTTPError("400")),
+        )
+        with patch("reviewbot.llm_client.time.sleep"), patch(
+            "reviewbot.llm_client.requests.post", return_value=rejected
+        ) as mock_post:
+            client = ChatCompletionClient(
+                "https://example.com/v1", "token", "fixed-model"
+            )
+            with self.assertRaises(requests.HTTPError):
+                client.complete([{"role": "user", "content": "hi"}])
+
+        self.assertEqual(mock_post.call_count, 1)
+
     def test_complete_raises_when_discovery_returns_no_models(self) -> None:
         with patch("reviewbot.llm_client.requests.get") as mock_get, patch(
             "reviewbot.llm_client.requests.post"

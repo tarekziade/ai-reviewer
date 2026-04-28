@@ -9,6 +9,12 @@ import requests
 log = logging.getLogger(__name__)
 
 
+class _ToolsUnsupported(Exception):
+    """Raised when the upstream endpoint rejects a tool-augmented request
+    with 400, so the caller can retry once without tools. Carries the
+    response body preview for logging."""
+
+
 @dataclass
 class ToolCall:
     """One tool/function call emitted by the assistant. ``arguments`` is
@@ -142,7 +148,6 @@ class ChatCompletionClient:
             payload.update(extra)
 
         url = f"{self._api_base_v1()}/chat/completions"
-        body = json.dumps(payload)
         attempts = 3
         retryable = (
             requests.ConnectionError,
@@ -150,6 +155,31 @@ class ChatCompletionClient:
             requests.exceptions.ChunkedEncodingError,
         )
         started = time.monotonic()
+        try:
+            return self._post_with_retries(
+                url, payload, attempts, retryable, started, tools_in_use=bool(tools)
+            )
+        except _ToolsUnsupported:
+            # Endpoint rejected the tool-augmented payload. Strip the
+            # function-calling fields and try once more so the review can
+            # still complete (degraded: no browse tools).
+            for k in ("tools", "tool_choice"):
+                payload.pop(k, None)
+            return self._post_with_retries(
+                url, payload, attempts, retryable, started, tools_in_use=False
+            )
+
+    def _post_with_retries(
+        self,
+        url: str,
+        payload: dict[str, Any],
+        attempts: int,
+        retryable: tuple,
+        started: float,
+        *,
+        tools_in_use: bool,
+    ) -> ChatResult:
+        body = json.dumps(payload)
         for attempt in range(1, attempts + 1):
             try:
                 r = requests.post(
@@ -168,6 +198,25 @@ class ChatCompletionClient:
                     )
                     time.sleep(2**attempt)
                     continue
+                if not r.ok:
+                    # Surface the upstream error body so the action log
+                    # explains *why* the request was rejected (e.g. "tools
+                    # not supported by this model"). Without this, the
+                    # caller only sees "400 Bad Request" and has to guess.
+                    body_preview = (r.text or "")[:2000]
+                    log.error(
+                        "LLM call returned %d %s for %s; body=%s",
+                        r.status_code,
+                        r.reason,
+                        url,
+                        body_preview,
+                    )
+                    if r.status_code == 400 and tools_in_use:
+                        log.warning(
+                            "Retrying once without tools (the endpoint may "
+                            "not support function-calling for this model)"
+                        )
+                        raise _ToolsUnsupported(body_preview)
                 r.raise_for_status()
                 if self.stream:
                     content, usage, tool_calls, finish_reason = self._consume_stream(r)
