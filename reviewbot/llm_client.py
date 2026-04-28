@@ -201,7 +201,10 @@ class ChatCompletionClient:
         block when the server emits one (requires stream_options.include_usage).
 
         Logs a periodic progress line so long-running streams visibly make
-        progress in the action's console output.
+        progress in the action's console output. Also tracks per-field char
+        counts on ``delta`` so reasoning/thinking models (which stream
+        content into ``delta.reasoning_content`` or similar instead of
+        ``delta.content``) are easy to spot in the action log.
 
         Raises ChunkedEncodingError / ConnectionError if the upstream cuts the
         connection mid-stream — the outer retry loop in ``complete`` handles
@@ -211,6 +214,10 @@ class ChatCompletionClient:
         usage: dict[str, Any] = {}
         chars = 0
         events = 0
+        # Per-field char counts across all observed delta keys, so it's
+        # obvious in the log if the model streams into a non-standard field.
+        delta_field_chars: dict[str, int] = {}
+        first_delta_logged = False
         stream_started = time.monotonic()
         last_progress = stream_started
         try:
@@ -218,10 +225,12 @@ class ChatCompletionClient:
                 now = time.monotonic()
                 if now - last_progress >= cls.PROGRESS_INTERVAL_SECONDS:
                     log.info(
-                        "LLM stream progress: %.1fs elapsed, %d events, %d chars",
+                        "LLM stream progress: %.1fs elapsed, %d events, "
+                        "%d content chars, delta fields=%s",
                         now - stream_started,
                         events,
                         chars,
+                        cls._format_field_counts(delta_field_chars),
                     )
                     last_progress = now
                 if not raw:
@@ -243,6 +252,18 @@ class ChatCompletionClient:
                 choices = event.get("choices") or []
                 if choices:
                     delta = choices[0].get("delta") or {}
+                    if not first_delta_logged and delta:
+                        log.info(
+                            "LLM first delta keys=%s sample=%s",
+                            sorted(delta.keys()),
+                            cls._truncate_repr(delta, 300),
+                        )
+                        first_delta_logged = True
+                    for key, value in delta.items():
+                        if isinstance(value, str) and value:
+                            delta_field_chars[key] = (
+                                delta_field_chars.get(key, 0) + len(value)
+                            )
                     piece = delta.get("content")
                     if isinstance(piece, str):
                         parts.append(piece)
@@ -252,17 +273,32 @@ class ChatCompletionClient:
             requests.ConnectionError,
         ) as exc:
             log.warning(
-                "LLM stream interrupted after %.1fs, %d events, %d chars: %s",
+                "LLM stream interrupted after %.1fs, %d events, %d content "
+                "chars, delta fields=%s: %s",
                 time.monotonic() - stream_started,
                 events,
                 chars,
+                cls._format_field_counts(delta_field_chars),
                 exc,
             )
             raise
         log.info(
-            "LLM stream complete: %.1fs elapsed, %d events, %d chars",
+            "LLM stream complete: %.1fs elapsed, %d events, %d content chars, "
+            "delta fields=%s",
             time.monotonic() - stream_started,
             events,
             chars,
+            cls._format_field_counts(delta_field_chars),
         )
         return "".join(parts), usage
+
+    @staticmethod
+    def _format_field_counts(counts: dict[str, int]) -> str:
+        if not counts:
+            return "{}"
+        return "{" + ", ".join(f"{k}={v}" for k, v in sorted(counts.items())) + "}"
+
+    @staticmethod
+    def _truncate_repr(obj: Any, limit: int) -> str:
+        s = json.dumps(obj, default=str, ensure_ascii=False)
+        return s if len(s) <= limit else s[:limit] + "..."
