@@ -187,6 +187,8 @@ the workflow YAML, store that as a secret too:
 | `max_diff_chars`        | `200000`                                      |          |
 | `review_rules_path`     | `.ai/review-rules.md`                         |          |
 | `default_review_rules`  | generic Python correctness prompt             |          |
+| `context_script_path`   | `.ai/context-script`                          |          |
+| `context_script_timeout`| `30`                                          |          |
 | `github_token`          | `${{ github.token }}`                         |          |
 | `python_version`        | `3.12`                                        |          |
 
@@ -200,6 +202,36 @@ On any open PR, post a comment as a collaborator/member/owner:
 
 Within a few seconds a full PR review lands with inline comments
 anchored to the diff.
+
+### Repo-supplied extra context
+
+Drop an executable script at `.ai/context-script` (path configurable
+via `context_script_path`) and the reviewer will run it on every
+review, piping a JSON document on stdin:
+
+```json
+{
+  "title": "PR title",
+  "body":  "PR description",
+  "files": [
+    {"path": "foo.py", "status": "modified",
+     "additions": 12, "deletions": 3, "previous_path": null}
+  ]
+}
+```
+
+Anything the script writes to stdout is stitched into the user prompt
+inside a `REPO-PROVIDED CONTEXT` block — use it to flag high-risk file
+combinations, point the reviewer at related code, or surface repo
+conventions. The script must be executable; if it's missing, not
+executable, exits non-zero, or times out (default 30 s), the review
+proceeds without extra context. This repo dogfoods the feature with a
+Python script at `.ai/context-script`.
+
+The script runs in Action mode only (the App-mode webhook does not
+check out the repo). It executes from the default branch (since
+`actions/checkout@v4` on `issue_comment` events checks out the event
+ref), so treat it at the same trust level as `.ai/review-rules.md`.
 
 ---
 

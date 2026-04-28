@@ -44,6 +44,8 @@ class Config:
     default_review_rules: str
     allow_approve: bool
     persona_header: str
+    context_script_path: str
+    context_script_timeout: int
 
     @classmethod
     def from_env(cls, *, require_app: bool = True) -> "Config":
@@ -86,4 +88,6 @@ class Config:
             ),
             allow_approve=os.environ.get("ALLOW_APPROVE", "").lower() in ("1", "true", "yes"),
             persona_header=os.environ.get("PERSONA_HEADER", "🤗 **Serge** says:"),
+            context_script_path=os.environ.get("CONTEXT_SCRIPT_PATH", ".ai/context-script"),
+            context_script_timeout=_int_env("CONTEXT_SCRIPT_TIMEOUT", 30),
         )

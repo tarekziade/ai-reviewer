@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from config import Config
+from context_script import run_context_script
 from github_client import GitHubClient
 from llm_client import ChatCompletionClient, ChatResult
 from patch import ParsedFile, parse_patch
@@ -159,6 +160,16 @@ def run_review(cfg: Config, gh: GitHubClient, req: ReviewRequest) -> None:
 
     review_rules = _load_review_rules(gh, req.owner, req.repo, pr, cfg)
 
+    extra_context = run_context_script(
+        cfg.context_script_path,
+        title=pr.get("title") or "",
+        body=pr.get("body") or "",
+        files=files,
+        timeout_seconds=cfg.context_script_timeout,
+    )
+    if extra_context:
+        log.info("context script produced %d chars of extra context", len(extra_context))
+
     llm = ChatCompletionClient(
         cfg.llm_api_base,
         cfg.llm_api_key,
@@ -176,6 +187,7 @@ def run_review(cfg: Config, gh: GitHubClient, req: ReviewRequest) -> None:
         commenter=req.commenter,
         trigger_comment=req.trigger_comment_body,
         diff=diff_text,
+        extra_context=extra_context,
     )
 
     chat = llm.complete(

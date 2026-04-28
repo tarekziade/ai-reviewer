@@ -47,6 +47,14 @@ inputs:
     description: 'Fallback rules used when the repo has no review-rules file.'
     required: false
     default: 'Apply general Python correctness and security standards.'
+  context_script_path:
+    description: 'Path to an executable script in the target repo that, given the PR title/body and modified-file list as JSON on stdin, prints additional context to inject into the reviewer prompt. Skipped silently if the file is missing or not executable.'
+    required: false
+    default: '.ai/context-script'
+  context_script_timeout:
+    description: 'Seconds to wait for the context script before giving up.'
+    required: false
+    default: '30'
   github_token:
     description: 'Token with pull-requests:write. Defaults to the job token.'
     required: false
@@ -83,4 +91,6 @@ runs:
         MAX_DIFF_CHARS: ${{ inputs.max_diff_chars }}
         REVIEW_RULES_PATH: ${{ inputs.review_rules_path }}
         DEFAULT_REVIEW_RULES: ${{ inputs.default_review_rules }}
+        CONTEXT_SCRIPT_PATH: ${{ inputs.context_script_path }}
+        CONTEXT_SCRIPT_TIMEOUT: ${{ inputs.context_script_timeout }}
       run: python "${{ github.action_path }}/action_runner.py"
