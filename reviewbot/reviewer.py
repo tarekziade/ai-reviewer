@@ -25,24 +25,66 @@ class ReviewRequest:
     commenter: str
 
 
-_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.DOTALL)
+_FENCED_BLOCK_RE = re.compile(r"```(?:json|JSON)?\s*([\s\S]*?)\s*```")
+_PARSE_PREVIEW_CHARS = 500
 
 
-def _extract_json(content: str) -> dict[str, Any]:
-    """Be forgiving: accept raw JSON, fenced JSON, or the first {...} block."""
-    content = content.strip()
+def _content_preview(text: str, limit: int = _PARSE_PREVIEW_CHARS) -> str:
+    if len(text) <= limit:
+        return text
+    return text[:limit] + f"... [+{len(text) - limit} chars truncated]"
+
+
+def _extract_json(content: Optional[str]) -> dict[str, Any]:
+    """Forgiving JSON extraction. Tries, in order:
+
+    1. Direct parse of the stripped content.
+    2. Each fenced ``` block (with or without a `json` language tag).
+    3. ``raw_decode`` starting at every ``{`` position, picking the first
+       attempt that yields a JSON object.
+
+    The third pass means trailing prose after the JSON ("Hope this helps!")
+    or surrounding chatter ("Sure, here you go: {...}") doesn't break us.
+    Raises ValueError with a length-and-preview diagnostic when nothing parses.
+    """
+    if not content:
+        raise ValueError("LLM response was empty")
+    text = content.strip()
+    if not text:
+        raise ValueError("LLM response was whitespace only")
+
+    decoder = json.JSONDecoder()
+
     try:
-        return json.loads(content)
+        result = decoder.decode(text)
+        if isinstance(result, dict):
+            return result
     except json.JSONDecodeError:
         pass
-    m = _JSON_FENCE_RE.search(content)
-    if m:
-        return json.loads(m.group(1))
-    start = content.find("{")
-    end = content.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        return json.loads(content[start : end + 1])
-    raise ValueError("LLM response did not contain a JSON object")
+
+    for match in _FENCED_BLOCK_RE.finditer(text):
+        candidate = match.group(1).strip()
+        if not candidate:
+            continue
+        try:
+            result = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(result, dict):
+            return result
+
+    for idx in (i for i, ch in enumerate(text) if ch == "{"):
+        try:
+            result, _ = decoder.raw_decode(text[idx:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(result, dict):
+            return result
+
+    raise ValueError(
+        f"LLM response did not contain a JSON object "
+        f"(length={len(content)} chars, preview={_content_preview(text)!r})"
+    )
 
 
 def _build_annotated_diff(
@@ -265,6 +307,20 @@ def _summarize_args(args: dict[str, Any], limit: int = 200) -> str:
     return s if len(s) <= limit else s[:limit] + "..."
 
 
+def _summarize_rejected_comments(rejected: list[dict[str, Any]], max_items: int = 5) -> str:
+    """Render the first few rejected comments as `path:line` refs so the
+    log line stays short even if the model emitted dozens of bogus inline
+    comments. Without this, the full payloads bloat the action log."""
+    refs: list[str] = []
+    for c in rejected[:max_items]:
+        path = c.get("path", "?")
+        line = c.get("line", "?")
+        refs.append(f"{path}:{line}")
+    if len(rejected) > max_items:
+        refs.append(f"...(+{len(rejected) - max_items} more)")
+    return ", ".join(refs)
+
+
 def _load_review_rules(gh: GitHubClient, owner: str, repo: str, pr: dict, cfg: Config) -> str:
     default_branch = pr.get("base", {}).get("repo", {}).get("default_branch") or "main"
     try:
@@ -276,7 +332,13 @@ def _load_review_rules(gh: GitHubClient, owner: str, repo: str, pr: dict, cfg: C
 
 
 def run_review(cfg: Config, gh: GitHubClient, req: ReviewRequest) -> None:
-    log.info("Starting review of %s/%s#%d", req.owner, req.repo, req.number)
+    log.info(
+        "Starting review of %s/%s#%d (triggered by @%s)",
+        req.owner,
+        req.repo,
+        req.number,
+        req.commenter,
+    )
 
     try:
         gh.add_reaction_to_issue_comment(req.owner, req.repo, req.trigger_comment_id, "eyes")
@@ -361,13 +423,25 @@ def run_review(cfg: Config, gh: GitHubClient, req: ReviewRequest) -> None:
 
     try:
         result = _extract_json(chat.content)
-    except Exception:
-        log.exception("could not parse LLM output as JSON")
+    except ValueError as exc:
+        # Parse failure is an expected outcome (model refusal, truncation,
+        # prose-only response). Log a single diagnostic line rather than a
+        # stacktrace — the preview is in the exception message.
+        log.error(
+            "could not parse LLM output as JSON: %s "
+            "(content_chars=%d, finish_reason=%s, prompt_tokens=%s, completion_tokens=%s)",
+            exc,
+            len(chat.content or ""),
+            chat.finish_reason,
+            chat.prompt_tokens,
+            chat.completion_tokens,
+        )
         gh.post_issue_comment(
             req.owner,
             req.repo,
             req.number,
-            f"Reviewer LLM returned unparseable output ({metrics_line}):\n\n```\n{chat.content[:3000]}\n```",
+            f"Reviewer LLM returned unparseable output ({metrics_line}, "
+            f"finish_reason={chat.finish_reason}):\n\n```\n{(chat.content or '')[:3000]}\n```",
         )
         return
 
@@ -382,7 +456,11 @@ def run_review(cfg: Config, gh: GitHubClient, req: ReviewRequest) -> None:
 
     valid, rejected = _validate_comments(result.get("comments") or [], parsed_by_path)
     if rejected:
-        log.warning("Dropped %d invalid comment(s): %s", len(rejected), rejected)
+        log.warning(
+            "Dropped %d invalid comment(s) (referenced lines not in diff or malformed): %s",
+            len(rejected),
+            _summarize_rejected_comments(rejected),
+        )
 
     # GitHub requires a body when there are no inline comments and the event is
     # not APPROVE; also REQUEST_CHANGES requires at least one comment or a body.
@@ -407,10 +485,11 @@ def run_review(cfg: Config, gh: GitHubClient, req: ReviewRequest) -> None:
         event=event,
     )
     log.info(
-        "Posted review on %s/%s#%d (%d inline, event=%s)",
+        "Posted review on %s/%s#%d (%d inline, event=%s, %s)",
         req.owner,
         req.repo,
         req.number,
         len(valid),
         event,
+        metrics_line,
     )
