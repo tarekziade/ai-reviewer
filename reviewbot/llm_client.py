@@ -451,11 +451,16 @@ class ChatCompletionClient:
                                 reasoning_buffer.append(value)
                                 # Forward reasoning live so the web UI can
                                 # show the model's chain-of-thought as it
-                                # arrives (instead of only the periodic
-                                # log dump). Buffering + log flushes below
-                                # still happen so Action-mode logs stay
-                                # readable.
-                                if chunk_callback is not None:
+                                # arrives. Skip non-string / empty values
+                                # so a null delta doesn't render as "null"
+                                # or "None" in the console; reasoning
+                                # tokens are sometimes interleaved with
+                                # nulls in vendor stream formats.
+                                if (
+                                    chunk_callback is not None
+                                    and isinstance(value, str)
+                                    and value
+                                ):
                                     try:
                                         chunk_callback("reasoning", value)
                                     except Exception:

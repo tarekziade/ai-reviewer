@@ -606,20 +606,32 @@ def _run_agentic_loop(
     # answer.
     response_format = None if tools_arg else {"type": "json_object"}
 
-    # ``tool_max_iterations <= 0`` means "no cap" — keep looping as long
-    # as the model keeps asking for tools. In practice it stops by
-    # emitting a non-tool reply; this branch is only here so a runaway
-    # loop is bounded when the user opts in.
+    # ``tool_max_iterations <= 0`` means "no cap". When set, the cap
+    # applies to *content turns* — turns where the model produced text
+    # (a reasoning step or its final answer). Tool-only turns are pure
+    # investigation and don't burn the budget; an absolute ceiling on
+    # raw iterations still bounds infinite-tool-loop pathologies.
     iter_cap: Optional[int] = (
         cfg.tool_max_iterations if cfg.tool_max_iterations > 0 else None
     )
+    ABSOLUTE_ITER_CEILING = 60
     iteration = 0
+    content_turns = 0
     while True:
         iteration += 1
-        if iter_cap is not None and iteration > iter_cap:
+        if iteration > ABSOLUTE_ITER_CEILING:
+            log.warning(
+                "Agent loop hit absolute ceiling of %d iterations; bailing out",
+                ABSOLUTE_ITER_CEILING,
+            )
             break
-        label = f"{iteration}/{iter_cap}" if iter_cap is not None else f"{iteration}"
-        log.info("Agent loop iteration %s", label)
+        if iter_cap is not None and content_turns >= iter_cap:
+            break
+        if iter_cap is not None:
+            label = f"{content_turns + 1}/{iter_cap}"
+        else:
+            label = f"{iteration}"
+        log.info("Agent loop iteration %s (raw=%d)", label, iteration)
         if emit is not None:
             emit("step", f"llm:{label}")
             emit("log", f"LLM turn {label}")
@@ -638,6 +650,13 @@ def _run_agentic_loop(
         if chat.completion_tokens is not None:
             metrics.completion_tokens += chat.completion_tokens
         _emit_metrics(emit, metrics)
+
+        # A turn only counts against the content-turn budget if the
+        # model actually produced text. Pure tool-call turns are
+        # investigation — they advance us toward the answer without
+        # consuming a "thinking" slot.
+        if (chat.content or "").strip():
+            content_turns += 1
 
         if not chat.tool_calls:
             return chat, metrics
@@ -684,13 +703,18 @@ def _run_agentic_loop(
             })
 
     # Iteration budget hit — force a final answer with tools disabled.
-    # Only reachable when ``tool_max_iterations > 0``.
+    # Only reachable when ``tool_max_iterations > 0`` and the model
+    # used up its content-turn allowance, or when the absolute ceiling
+    # tripped (runaway tool calling).
     log.warning(
-        "Tool budget (%d) exhausted; asking model for a final review without tools",
+        "Agent budget exhausted (content_turns=%d, raw_iter=%d, cap=%d); "
+        "asking model for a final review without tools",
+        content_turns,
+        iteration,
         cfg.tool_max_iterations,
     )
     if emit is not None:
-        emit("log", "Tool budget exhausted; asking for a final review without tools")
+        emit("log", "Agent budget exhausted; asking for a final review without tools")
     messages.append({
         "role": "user",
         "content": (
