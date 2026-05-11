@@ -618,7 +618,11 @@ def _run_agentic_loop(
     iter_cap: Optional[int] = (
         cfg.tool_max_iterations if cfg.tool_max_iterations > 0 else None
     )
-    ABSOLUTE_ITER_CEILING = 60
+    # Absolute backstop: at least twice the configured blind-turn cap,
+    # but never below 60. Prevents a runaway model from chaining tool
+    # calls indefinitely while still leaving real investigations room
+    # to grow when the operator raises tool_max_iterations.
+    ABSOLUTE_ITER_CEILING = max(60, (iter_cap or 0) * 2)
     iteration = 0
     blind_tool_turns = 0
     while True:

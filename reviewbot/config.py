@@ -193,9 +193,12 @@ class Config:
             context_script_timeout=_int_env("CONTEXT_SCRIPT_TIMEOUT", 30),
             repo_checkout_path=(os.environ.get("REPO_CHECKOUT_PATH") or "").strip(),
             # Set TOOL_MAX_ITERATIONS=0 to disable the cap entirely;
-            # otherwise the agentic loop bails out after this many turns
-            # and asks for a final answer with tools off.
-            tool_max_iterations=_int_env("TOOL_MAX_ITERATIONS", 15),
+            # otherwise the agentic loop bails out after this many
+            # blind tool-call turns and asks for a final answer with
+            # tools off. The default is generous so that tool-heavy
+            # investigations (browse + grep + helper linter) on large
+            # PRs complete without being forced to truncate.
+            tool_max_iterations=_int_env("TOOL_MAX_ITERATIONS", 30),
             github_oauth_client_id=oauth_client_id,
             github_oauth_client_secret=oauth_client_secret,
             github_oauth_callback_url=oauth_callback_url,
