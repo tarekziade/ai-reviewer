@@ -60,6 +60,11 @@ class Config:
     llm_bill_to: Optional[str]
     llm_max_tokens: int
     llm_stream: bool
+    # Optional ``reasoning_effort`` passed through on /v1/chat/completions.
+    # Supported by some endpoints (OpenAI o-series, HF Router for the
+    # Kimi-K2 thinking variants, etc.). Common values: "low", "medium",
+    # "high". Leave empty to omit the parameter entirely.
+    llm_reasoning_effort: Optional[str]
 
     mention_trigger: str
     review_event: str
@@ -172,6 +177,7 @@ class Config:
             # and reasoning display rely on incremental SSE chunks. Set
             # LLM_STREAM=0 to fall back to the buffered REST path.
             llm_stream=_bool_env("LLM_STREAM", True),
+            llm_reasoning_effort=(os.environ.get("LLM_REASONING_EFFORT") or "").strip() or None,
             mention_trigger=os.environ.get("MENTION_TRIGGER", "@serge"),
             review_event=os.environ.get("REVIEW_EVENT", "COMMENT"),
             max_diff_chars=_int_env("MAX_DIFF_CHARS", 200000),

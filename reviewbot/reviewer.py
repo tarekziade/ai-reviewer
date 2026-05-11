@@ -508,6 +508,7 @@ def _synthesize_merged_summary(
     *,
     pr_title: str,
     max_tokens: int,
+    reasoning_effort: Optional[str] = None,
     emit: Optional[Callable[[str, str], None]] = None,
 ) -> tuple[Optional[str], Optional["_AggregateMetrics"]]:
     """Run a small synthesis LLM call to merge per-chunk summaries into
@@ -544,6 +545,7 @@ def _synthesize_merged_summary(
             ],
             max_tokens=max_tokens,
             chunk_callback=chunk_cb,
+            extra={"reasoning_effort": reasoning_effort} if reasoning_effort else None,
         )
     except Exception as exc:  # noqa: BLE001
         log.warning("synthesis merge failed: %s", exc)
@@ -648,6 +650,7 @@ def _run_agentic_loop(
             tools=tools_arg,
             tool_choice="auto" if tools_arg else None,
             chunk_callback=chunk_cb,
+            extra={"reasoning_effort": cfg.llm_reasoning_effort} if cfg.llm_reasoning_effort else None,
         )
         metrics.turns += 1
         metrics.latency_seconds += chat.latency_seconds
@@ -739,6 +742,7 @@ def _run_agentic_loop(
         response_format={"type": "json_object"},
         max_tokens=cfg.llm_max_tokens,
         chunk_callback=chunk_cb,
+        extra={"reasoning_effort": cfg.llm_reasoning_effort} if cfg.llm_reasoning_effort else None,
     )
     metrics.turns += 1
     metrics.latency_seconds += chat.latency_seconds

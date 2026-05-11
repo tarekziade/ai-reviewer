@@ -404,6 +404,17 @@ class ChatCompletionClient:
         usage: dict[str, Any] = {}
         chars = 0
         events = 0
+        # Buffer the head of the content stream so we can detect a
+        # vendor placeholder like "None" / "null" that arrives split
+        # across multiple deltas (e.g. "No" + "ne"). Once we've seen
+        # enough chars to be certain it's not a placeholder, we flush
+        # the buffer to the UI and switch to direct forwarding.
+        # At end of stream, if the entire accumulated content matched
+        # a placeholder we drop it from chat.content as well.
+        content_head_buffer = ""
+        content_head_flushed = False
+        CONTENT_HEAD_FLUSH_THRESHOLD = 8
+        PLACEHOLDER_CONTENTS = ("None", "null", "")
         # Per-field char counts across all observed delta keys, so it's
         # obvious in the log if the model streams into a non-standard field.
         delta_field_chars: dict[str, int] = {}
@@ -493,25 +504,51 @@ class ChatCompletionClient:
                                             exc_info=True,
                                         )
                     piece = delta.get("content")
-                    if isinstance(piece, str):
+                    if isinstance(piece, str) and piece:
                         # Some inference stacks (vLLM with certain tool
                         # parsers, Kimi-K2 on HF Router) emit a literal
                         # "None" / "null" content chunk as filler when
                         # the model is firing tool calls without real
-                        # text output. Drop those so they don't end up
-                        # in chat.content or the live UI console.
-                        if piece.strip() in ("None", "null"):
-                            continue
-                        parts.append(piece)
+                        # text. The chunks can arrive split across
+                        # multiple deltas ("No" + "ne"), so we buffer
+                        # the head of the stream and only commit it
+                        # once we're sure it isn't a placeholder.
                         chars += len(piece)
-                        if chunk_callback is not None and piece:
-                            try:
-                                chunk_callback("token", piece)
-                            except Exception:
-                                log.debug(
-                                    "chunk_callback raised; suppressing",
-                                    exc_info=True,
-                                )
+                        if content_head_flushed:
+                            # Past the threshold — append straight
+                            # through, both to parts and UI.
+                            parts.append(piece)
+                            if chunk_callback is not None:
+                                try:
+                                    chunk_callback("token", piece)
+                                except Exception:
+                                    log.debug(
+                                        "chunk_callback raised; suppressing",
+                                        exc_info=True,
+                                    )
+                        else:
+                            content_head_buffer += piece
+                            if (
+                                len(content_head_buffer)
+                                >= CONTENT_HEAD_FLUSH_THRESHOLD
+                            ):
+                                content_head_flushed = True
+                                if (
+                                    content_head_buffer.strip()
+                                    not in PLACEHOLDER_CONTENTS
+                                ):
+                                    parts.append(content_head_buffer)
+                                    if chunk_callback is not None:
+                                        try:
+                                            chunk_callback(
+                                                "token", content_head_buffer
+                                            )
+                                        except Exception:
+                                            log.debug(
+                                                "chunk_callback raised; suppressing",
+                                                exc_info=True,
+                                            )
+                                content_head_buffer = ""
                 # Periodic live-metrics estimate so the UI counter ticks
                 # during long reasoning streams. Authoritative `usage`
                 # arrives at end-of-stream and the caller will overwrite
@@ -567,6 +604,19 @@ class ChatCompletionClient:
         if len(joined_reasoning) > reasoning_logged_chars:
             tail = joined_reasoning[reasoning_logged_chars:]
             log.info("LLM reasoning >> %s", cls._compact(tail))
+        # End-of-stream: the head buffer either holds non-placeholder
+        # content (flush it) or a placeholder we silently dropped.
+        if not content_head_flushed and content_head_buffer:
+            if content_head_buffer.strip() not in PLACEHOLDER_CONTENTS:
+                parts.append(content_head_buffer)
+                if chunk_callback is not None:
+                    try:
+                        chunk_callback("token", content_head_buffer)
+                    except Exception:
+                        log.debug(
+                            "chunk_callback raised; suppressing",
+                            exc_info=True,
+                        )
         tool_calls = cls._finalize_tool_calls(tool_call_parts)
         log.info(
             "LLM stream complete: %.1fs elapsed, %d events, %d content chars, "
