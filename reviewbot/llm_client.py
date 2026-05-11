@@ -431,6 +431,13 @@ class ChatCompletionClient:
         stream_started = time.monotonic()
         last_progress = stream_started
         last_live_metrics = stream_started
+        # SSE is defined as UTF-8; force the decode regardless of what
+        # (if anything) the server declared in Content-Type. Without
+        # this, ``requests`` falls back to ISO-8859-1 for text/* and
+        # any non-ASCII char (em dashes, smart quotes, accented names)
+        # arrives as mojibake on the client side and gets re-encoded
+        # into the published review body.
+        r.encoding = "utf-8"
         try:
             for raw in r.iter_lines(decode_unicode=True):
                 now = time.monotonic()

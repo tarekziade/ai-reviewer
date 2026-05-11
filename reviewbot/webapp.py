@@ -36,7 +36,11 @@ from fastapi.staticfiles import StaticFiles
 from itsdangerous import BadSignature, URLSafeSerializer
 
 from .config import Config
-from .github_auth import installation_id_for_repo, installation_token
+from .github_auth import (
+    AppNotInstalledError,
+    installation_id_for_repo,
+    installation_token,
+)
 from .github_client import GitHubClient
 from .reviewer import (
     DraftComment,
@@ -373,6 +377,21 @@ def _run_review_worker(job: Job) -> None:
             f"LLM returned unparseable output (finish_reason={exc.finish_reason}, "
             f"{exc.metrics_line})"
         )
+        _push_event(job, "step", "error")
+        _push_event(job, "error", job.error)
+        _push_event(job, "done", "")
+    except AppNotInstalledError as exc:
+        # Expected failure mode — the App isn't installed on the target
+        # repo. Surface the actionable message verbatim instead of the
+        # generic "see server log".
+        log.warning(
+            "App not installed for %s/%s (job %s)",
+            exc.owner,
+            exc.repo,
+            job.id,
+        )
+        job.status = "error"
+        job.error = str(exc)
         _push_event(job, "step", "error")
         _push_event(job, "error", job.error)
         _push_event(job, "done", "")

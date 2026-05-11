@@ -4,6 +4,21 @@ import jwt
 import requests
 
 
+class AppNotInstalledError(RuntimeError):
+    """Raised when ``/repos/{owner}/{repo}/installation`` returns 404 —
+    i.e. the GitHub App is not installed on the target repo. The web UI
+    catches this and surfaces an actionable hint instead of crashing
+    the worker with a raw HTTPError stack."""
+
+    def __init__(self, owner: str, repo: str):
+        self.owner = owner
+        self.repo = repo
+        super().__init__(
+            f"The GitHub App is not installed on {owner}/{repo}. "
+            f"Install it from the App's settings page and try again."
+        )
+
+
 def app_jwt(app_id: str, private_key: str) -> str:
     now = int(time.time())
     payload = {"iat": now - 60, "exp": now + 9 * 60, "iss": app_id}
@@ -41,6 +56,8 @@ def installation_id_for_repo(
         },
         timeout=30,
     )
+    if r.status_code == 404:
+        raise AppNotInstalledError(owner, repo)
     r.raise_for_status()
     data = r.json()
     iid = data.get("id")
