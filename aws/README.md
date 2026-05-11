@@ -36,15 +36,18 @@ instance churn, no re-key, no downtime beyond a `systemctl restart`. It:
 
 - reads `.deploy-state.json` to find the instance + key
 - refreshes the cached private IP if AWS moved it
-- SSHes in and runs `git fetch && reset --hard origin/${REPO_BRANCH:-main}`
-  on `/opt/app/ai-reviewer`
+- rsyncs the local working tree to `/opt/app/ai-reviewer` (with
+  `--delete`, excluding `.git`, `.venv`, `aws/`, caches, and macOS
+  noise — so PEMs and local state never leave your machine)
 - `pip install -e '.[web]'` to pick up any new dependencies
 - rewrites `/etc/reviewbot/${SERVICE_NAME}.env` (and the PEM if your
   `GITHUB_PRIVATE_KEY_PATH` still points at a local file)
 - `sudo systemctl restart` the service and prints its status
 
-Use it whenever you've pushed code to the deployment branch or edited
-`reviewbot-web.env` locally. `REPO_BRANCH=other-branch ./aws/update.sh`
-deploys a non-default branch.
+Use it whenever you've changed code locally or edited
+`reviewbot-web.env`. Because it rsyncs your working tree, what's on
+the host matches what's on your laptop right now — uncommitted
+changes included. If you'd rather ship only what's pushed, commit
++ check out the deployment branch before running.
 
 Destroy the stack with `./aws/destroy.sh`.

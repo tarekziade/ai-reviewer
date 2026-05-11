@@ -5,11 +5,13 @@ before publishing. The published review still goes out under the
 GitHub App identity — OAuth is only used for access control.
 """
 import asyncio
+import base64
 import dataclasses
 import html as _html
 import json as _json
 import logging
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -66,14 +68,39 @@ log.info(
 _SESSION_COOKIE = "serge_session"
 _STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 
+# GitHub limits owner / repo names to ASCII alphanumerics plus a few
+# punctuation chars; we enforce the same so URL-pattern attacks (`..`,
+# encoded slashes, empty strings) can't leak through into API calls.
+_GH_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+_MAX_TRIGGER_COMMENT_CHARS = 4000
+
 
 # ---------------------------------------------------------------------------
 # Session handling: signed cookies via itsdangerous (no DB).
 # ---------------------------------------------------------------------------
-_serializer = URLSafeSerializer(
-    cfg.web_session_secret or "dev-no-auth-secret-not-for-production",
-    salt="serge.session",
-)
+def _resolve_session_secret() -> str:
+    secret = (cfg.web_session_secret or "").strip()
+    if secret:
+        return secret
+    if not cfg.web_dev_no_auth:
+        # Config.from_env(require_web=True) already enforces this when
+        # DEV_NO_AUTH is off; the assert is a belt-and-braces guard so we
+        # never silently fall back to a known string in production.
+        raise RuntimeError(
+            "WEB_SESSION_SECRET is required when DEV_NO_AUTH is off"
+        )
+    # Dev-only path: mint a fresh random secret per process so sessions
+    # don't survive restarts (which is fine in dev), and never share a
+    # well-known string between deployments.
+    ephemeral = secrets.token_urlsafe(32)
+    log.warning(
+        "DEV_NO_AUTH=1 and no WEB_SESSION_SECRET set; using an ephemeral "
+        "random session secret. Existing sessions will not survive restart."
+    )
+    return ephemeral
+
+
+_serializer = URLSafeSerializer(_resolve_session_secret(), salt="serge.session")
 
 
 def _load_session(request: Request) -> dict[str, Any]:
@@ -93,6 +120,9 @@ def _save_session(response: Response, data: dict[str, Any]) -> None:
         _serializer.dumps(data),
         httponly=True,
         samesite="lax",
+        # Cookie must travel only over HTTPS in production. In dev mode
+        # (DEV_NO_AUTH) we relax this so localhost http:// flows work.
+        secure=not cfg.web_dev_no_auth,
         max_age=60 * 60 * 24 * 7,
     )
 
@@ -179,17 +209,43 @@ def _clone_pr_head(
     so the LLM gets browse tools rooted at the PR's working tree. Works
     for forked PRs too — GitHub exposes the merge ref on the base repo.
 
+    The installation token is passed via ``http.extraHeader`` rather than
+    embedded in the remote URL — that way it never lands in process
+    listings (``/proc/<pid>/cmdline``) or git's own error messages.
+
     Returns the local path, or None if anything went wrong. The caller
     is responsible for deleting the directory."""
     tmpdir = tempfile.mkdtemp(prefix=f"serge-{owner}-{repo}-{number}-")
-    url = f"https://x-access-token:{token}@github.com/{owner}/{repo}.git"
+    url = f"https://github.com/{owner}/{repo}.git"
+    # Basic-auth with x-access-token as the username and the token as the
+    # password is the documented form for GitHub App installation tokens.
+    basic = base64.b64encode(f"x-access-token:{token}".encode()).decode()
+    auth_header = f"Authorization: Basic {basic}"
 
-    def _run(*args: str, timeout: int = 120) -> None:
+    env = {
+        "PATH": os.environ.get("PATH", ""),
+        "HOME": os.environ.get("HOME", ""),
+        # Refuse interactive credential prompts (would otherwise hang on
+        # auth failure) and ignore host-wide git config so a quirky
+        # /etc/gitconfig can't influence behavior.
+        "GIT_TERMINAL_PROMPT": "0",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        # The token-bearing header is only attached via -c; nothing on
+        # disk references it.
+        "GIT_ASKPASS": "/bin/false",
+    }
+
+    def _run(*args: str, timeout: int = 120, with_auth: bool = False) -> None:
+        cmd = ["git", "-C", tmpdir]
+        if with_auth:
+            cmd += ["-c", f"http.extraHeader={auth_header}"]
+        cmd += list(args)
         subprocess.run(
-            ["git", "-C", tmpdir, *args],
+            cmd,
             check=True,
             capture_output=True,
             timeout=timeout,
+            env=env,
         )
 
     try:
@@ -198,27 +254,33 @@ def _clone_pr_head(
             check=True,
             capture_output=True,
             timeout=30,
+            env=env,
         )
         _run("remote", "add", "origin", url)
+        # core.symlinks=false forces symlinks in the PR tree to be written
+        # as plain files, so helper tools rooted at the checkout cannot
+        # follow them out of the repo.
         _run(
+            "-c", "core.symlinks=false",
             "fetch",
             "--depth",
             str(depth),
             "origin",
             f"pull/{number}/head:pr",
             timeout=180,
+            with_auth=True,
         )
-        _run("checkout", "--quiet", "pr")
+        _run("-c", "core.symlinks=false", "checkout", "--quiet", "pr")
         return tmpdir
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-        # stderr from CalledProcessError contains the token in the URL — strip
-        # the token-bearing line so we don't leak it into logs.
+        # Defense in depth: scrub anything that looks like the token in
+        # case git or its transport ever echoed it back. The Authorization
+        # header itself is never on argv, so this is belt-and-braces.
         stderr = ""
         if isinstance(exc, subprocess.CalledProcessError) and exc.stderr:
             stderr = exc.stderr.decode("utf-8", errors="replace")
-            stderr = "\n".join(
-                line for line in stderr.splitlines() if "x-access-token" not in line
-            )
+            stderr = stderr.replace(token, "<redacted-token>")
+            stderr = stderr.replace(basic, "<redacted-basic>")
         log.warning(
             "git clone failed for %s/%s#%d (%s): %s",
             owner,
@@ -317,7 +379,11 @@ def _run_review_worker(job: Job) -> None:
     except Exception as exc:  # noqa: BLE001
         log.exception("review worker crashed for job %s", job.id)
         job.status = "error"
-        job.error = f"{type(exc).__name__}: {exc}"
+        # Exception messages occasionally echo upstream response bodies
+        # that may contain auth tokens (e.g. httpx HTTPError). Don't ship
+        # the raw repr to the SSE client — the full traceback is in the
+        # server log via log.exception above.
+        job.error = f"{type(exc).__name__}: review crashed (see server log)"
         _push_event(job, "step", "error")
         _push_event(job, "error", job.error)
         _push_event(job, "done", "")
@@ -359,6 +425,28 @@ def _require_user(request: Request) -> str:
             status_code=status.HTTP_401_UNAUTHORIZED, detail="not_authenticated"
         )
     return user
+
+
+def _require_same_origin(request: Request) -> None:
+    """CSRF guard for state-changing endpoints. SameSite=Lax already
+    blocks most cross-site form posts, but Origin/Referer is the
+    backstop — we refuse the request unless one of them points back at
+    the host we're serving on."""
+    expected_host = (request.url.netloc or "").lower()
+    if not expected_host:
+        return
+    origin = (request.headers.get("origin") or "").strip()
+    referer = (request.headers.get("referer") or "").strip()
+    for header in (origin, referer):
+        if not header:
+            continue
+        try:
+            host = urllib.parse.urlparse(header).netloc.lower()
+        except ValueError:
+            continue
+        if host == expected_host:
+            return
+    raise HTTPException(status_code=403, detail="bad_origin")
 
 
 def _serve_static(name: str) -> HTMLResponse:
@@ -499,7 +587,8 @@ async def auth_callback(request: Request) -> Response:
 
 
 @app.post("/auth/logout")
-def auth_logout() -> Response:
+def auth_logout(request: Request) -> Response:
+    _require_same_origin(request)
     response = RedirectResponse("/login", status_code=302)
     _clear_session(response)
     return response
@@ -538,6 +627,7 @@ def list_reviews(request: Request) -> JSONResponse:
 
 @app.post("/reviews")
 async def submit_review(request: Request) -> JSONResponse:
+    _require_same_origin(request)
     user = _require_user(request)
     payload = await request.json()
     pr_ref = (payload.get("pr") or "").strip()
@@ -547,6 +637,8 @@ async def submit_review(request: Request) -> JSONResponse:
     if not trigger_comment:
         trigger_comment = f"{cfg.mention_trigger} please review"
 
+    if len(trigger_comment) > _MAX_TRIGGER_COMMENT_CHARS:
+        raise HTTPException(status_code=413, detail="comment_too_long")
     owner, repo, number = _parse_pr_ref(pr_ref)
     _gc_jobs()
 
@@ -589,7 +681,7 @@ def _parse_pr_ref(ref: str) -> tuple[str, str, int]:
             if parts[2] not in ("pull", "pulls"):
                 raise ValueError("not a pull URL")
             number = int(parts[3])
-            return owner, repo, number
+            return _validate_pr_ref(owner, repo, number)
         except (IndexError, ValueError) as exc:
             raise HTTPException(status_code=400, detail=f"bad_pr_url: {exc}") from exc
     if "#" in s:
@@ -598,17 +690,25 @@ def _parse_pr_ref(ref: str) -> tuple[str, str, int]:
             raise HTTPException(status_code=400, detail="bad_pr_ref")
         owner, repo = repo_part.split("/", 1)
         try:
-            return owner, repo, int(num_part)
+            return _validate_pr_ref(owner, repo, int(num_part))
         except ValueError as exc:
             raise HTTPException(status_code=400, detail="bad_pr_number") from exc
     if "/" in s and s.count("/") >= 3 and "pull" in s.split("/"):
         parts = s.split("/")
         try:
             i = parts.index("pull")
-            return parts[i - 2], parts[i - 1], int(parts[i + 1])
+            return _validate_pr_ref(parts[i - 2], parts[i - 1], int(parts[i + 1]))
         except (ValueError, IndexError) as exc:
             raise HTTPException(status_code=400, detail="bad_pr_ref") from exc
     raise HTTPException(status_code=400, detail="bad_pr_ref")
+
+
+def _validate_pr_ref(owner: str, repo: str, number: int) -> tuple[str, str, int]:
+    if not _GH_NAME_RE.match(owner) or not _GH_NAME_RE.match(repo):
+        raise HTTPException(status_code=400, detail="bad_pr_ref")
+    if number < 1 or number > 10_000_000:
+        raise HTTPException(status_code=400, detail="bad_pr_number")
+    return owner, repo, number
 
 
 def _get_owned_job(
@@ -756,6 +856,7 @@ def _json_inline(s: str) -> str:
 async def publish(
     request: Request, owner: str, repo: str, number: int, job_id: str
 ) -> JSONResponse:
+    _require_same_origin(request)
     job = _get_owned_job(request, owner, repo, number, job_id)
     if job.draft is None:
         raise HTTPException(status_code=409, detail="draft_not_ready")
@@ -784,6 +885,11 @@ def _edits_from_payload(payload: dict[str, Any], draft: ReviewDraft) -> ReviewEd
     event = payload.get("event")
     if event is not None and event not in ("COMMENT", "REQUEST_CHANGES", "APPROVE"):
         raise HTTPException(status_code=400, detail="bad_event")
+    # APPROVE can be picked by the model from attacker-controlled diff/body,
+    # so unless the operator has opted in via ALLOW_APPROVE we refuse to
+    # publish it — even if a distracted reviewer clicked through.
+    if event == "APPROVE" and not cfg.allow_approve:
+        raise HTTPException(status_code=403, detail="approve_disabled")
     overrides_raw = payload.get("comment_overrides") or {}
     if not isinstance(overrides_raw, dict):
         raise HTTPException(status_code=400, detail="comment_overrides_must_be_object")
@@ -810,6 +916,7 @@ def _edits_from_payload(payload: dict[str, Any], draft: ReviewDraft) -> ReviewEd
 def discard(
     request: Request, owner: str, repo: str, number: int, job_id: str
 ) -> JSONResponse:
+    _require_same_origin(request)
     job = _get_owned_job(request, owner, repo, number, job_id)
     job.status = "discarded"
     job.draft = None

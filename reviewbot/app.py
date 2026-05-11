@@ -2,7 +2,7 @@ import hashlib
 import hmac
 import logging
 import os
-import threading
+from concurrent.futures import ThreadPoolExecutor
 
 from flask import Flask, abort, jsonify, request
 
@@ -20,6 +20,16 @@ log = logging.getLogger("ai-reviewer")
 
 cfg = Config.from_env(require_app=True)
 app = Flask(__name__)
+
+# Bound the number of concurrent reviews so a single chatty collaborator
+# (or a deliberately spammy comment loop) can't exhaust the runner or
+# blow up the LLM bill. Tune via WEBHOOK_MAX_WORKERS; the default fits a
+# small EC2 box.
+_MAX_WORKERS = int(os.environ.get("WEBHOOK_MAX_WORKERS", "2"))
+_REVIEW_POOL = ThreadPoolExecutor(
+    max_workers=_MAX_WORKERS,
+    thread_name_prefix="review-worker",
+)
 
 
 def _verify_signature(body: bytes, header: str) -> bool:
@@ -70,9 +80,7 @@ def webhook() -> tuple:
     if not isinstance(installation_id, int):
         return jsonify({"skipped": "no_installation"}), 204
 
-    threading.Thread(
-        target=_review_worker, args=(installation_id, req), daemon=True
-    ).start()
+    _REVIEW_POOL.submit(_review_worker, installation_id, req)
 
     return jsonify({"status": "accepted"}), 202
 

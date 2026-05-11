@@ -1,25 +1,31 @@
 #!/usr/bin/env bash
 # Refresh an existing reviewbot-web deployment in place.
 #
-# Reads .deploy-state.json (written by deploy.sh), then over SSH:
-#   - git fetch + reset --hard origin/${REPO_BRANCH} in /opt/app/ai-reviewer
-#   - pip install -e .[web] (catches new deps)
-#   - rewrite ${APP_ENV_REMOTE_FILE} from the local env file (and the PEM
-#     file if GITHUB_PRIVATE_KEY_PATH points somewhere other than the
-#     remote pem path)
+# Reads .deploy-state.json (written by deploy.sh), then:
+#   - rsync the local working tree to /opt/app/ai-reviewer (excluding
+#     .git, .venv, aws/, caches, and macOS noise — so PEMs and local
+#     state never leave this machine)
+#   - pip install -e .[web] on the remote (catches new deps)
+#   - rewrite ${APP_ENV_REMOTE_FILE} from the local env file (and the
+#     PEM file if GITHUB_PRIVATE_KEY_PATH points somewhere other than
+#     the remote pem path)
 #   - systemctl restart ${SERVICE_NAME}
 #
 # Safe to run repeatedly. Does NOT touch the EC2 instance, security
-# group, or key pair — only the application bits inside it.
+# group, or key pair — only the application bits inside it. Works for
+# both fresh deploys (where the remote is a git clone) and existing
+# rsync-managed boxes — we just overwrite the tree.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE_FILE="${SCRIPT_DIR}/.deploy-state.json"
 
-for cmd in aws jq ssh base64; do
+for cmd in aws jq ssh rsync base64; do
   command -v "$cmd" >/dev/null || { echo "missing dependency: $cmd" >&2; exit 1; }
 done
+
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 if [[ ! -f "$STATE_FILE" ]]; then
   echo "no state file at $STATE_FILE — run deploy.sh first." >&2
@@ -34,7 +40,6 @@ SERVICE_NAME="$(jq -r .service_name "$STATE_FILE")"
 APP_ENV_LOCAL_FILE="$(jq -r .app_env_local "$STATE_FILE")"
 PEM_REMOTE_FILE="$(jq -r .pem_remote "$STATE_FILE")"
 
-REPO_BRANCH="${REPO_BRANCH:-main}"
 APP_DIR="/opt/app/ai-reviewer"
 APP_ENV_REMOTE_FILE="/etc/reviewbot/${SERVICE_NAME}.env"
 
@@ -121,13 +126,28 @@ SSH_OPTS=(
   -o ConnectTimeout=10
 )
 
+echo "==> rsyncing $REPO_ROOT -> ec2-user@${PRIVATE_IP}:${APP_DIR}"
+# Excludes: anything that would either clobber the remote venv, leak
+# local secrets, or pollute the tree with macOS / build noise.
+rsync -az --delete \
+  -e "ssh ${SSH_OPTS[*]}" \
+  --exclude=.git/ \
+  --exclude=.venv/ \
+  --exclude=aws/ \
+  --exclude=.claude/ \
+  --exclude=__pycache__/ \
+  --exclude='*.pyc' \
+  --exclude='*.egg-info/' \
+  --exclude=.pytest_cache/ \
+  --exclude=.mypy_cache/ \
+  --exclude=.ruff_cache/ \
+  --exclude=.DS_Store \
+  --exclude='._*' \
+  --exclude=node_modules/ \
+  "$REPO_ROOT/" "ec2-user@${PRIVATE_IP}:${APP_DIR}/"
+
 REMOTE_SCRIPT=$(cat <<EOF
 set -euo pipefail
-
-echo "==> pulling latest ${REPO_BRANCH}"
-sudo -u ec2-user git -C "${APP_DIR}" fetch --quiet origin "${REPO_BRANCH}"
-sudo -u ec2-user git -C "${APP_DIR}" checkout --quiet "${REPO_BRANCH}"
-sudo -u ec2-user git -C "${APP_DIR}" reset --hard "origin/${REPO_BRANCH}"
 
 echo "==> reinstalling deps"
 sudo -u ec2-user "${APP_DIR}/.venv/bin/pip" install --quiet --upgrade pip

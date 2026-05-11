@@ -1,6 +1,11 @@
+import logging
 import os
+import stat
 from dataclasses import dataclass
 from typing import Optional
+
+
+log = logging.getLogger(__name__)
 
 
 def _int_env(name: str, default: int) -> int:
@@ -18,6 +23,18 @@ def _load_private_key() -> Optional[str]:
     path = os.environ.get("GITHUB_PRIVATE_KEY_PATH")
     if not path:
         return None
+    try:
+        mode = os.stat(path).st_mode
+        if stat.S_IMODE(mode) & 0o077:
+            log.warning(
+                "GITHUB_PRIVATE_KEY_PATH %s is group/world-readable "
+                "(mode=%o); tighten permissions with `chmod 600 %s`",
+                path,
+                stat.S_IMODE(mode),
+                path,
+            )
+    except OSError:
+        pass
     with open(path, "r") as f:
         return f.read()
 

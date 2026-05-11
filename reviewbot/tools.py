@@ -75,7 +75,61 @@ _HELPER_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 _ALLOWED_INSTALLERS = frozenset({"pip"})
 MAX_HELPER_INSTALL_ARGS = 16
 INSTALL_TIMEOUT_SECONDS = 300
-_INSTALL_ARG_RE = re.compile(r"^[A-Za-z0-9._\-+=/@:~,\[\]]+$")
+# Pip install args are restricted to plain package specifiers and version
+# pins. We deliberately reject characters that enable VCS / URL installs
+# (`@`, `/`, `:`) and flag forms that point pip at attacker-controlled
+# indexes — anyone with default-branch write access to a configured repo
+# would otherwise be able to land arbitrary code in the reviewer's
+# Python environment.
+_INSTALL_ARG_RE = re.compile(r"^[A-Za-z0-9._\-+=,\[\]]+$")
+_INSTALL_ALLOWED_FLAGS = frozenset({"install", "--upgrade", "-U", "--user"})
+_INSTALL_DENY_FLAG_PREFIXES = (
+    "--index-url",
+    "--extra-index-url",
+    "-i",
+    "--find-links",
+    "-f",
+    "--trusted-host",
+    "--config-settings",
+    "--editable",
+    "-e",
+    "--target",
+    "-t",
+    "--prefix",
+    "--root",
+    "--no-deps",
+)
+
+
+# Helper subprocesses run binaries pulled from a repo-controlled config
+# (.ai/review-tools.json on the default branch). Even though that config
+# requires default-branch write access to land, the helper binary itself
+# is opaque to us — so we hand it a minimal env that omits every secret
+# the reviewbot process holds (GitHub App private key, LLM API key, OAuth
+# client secret, session secret, webhook secret, etc.).
+_HELPER_ENV_PASSTHROUGH = (
+    "PATH",
+    "HOME",
+    "USER",
+    "LOGNAME",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "TERM",
+    "TZ",
+    "TMPDIR",
+    "PYTHONHASHSEED",
+    "SHELL",
+)
+
+
+def _helper_subprocess_env() -> dict[str, str]:
+    env = {k: os.environ[k] for k in _HELPER_ENV_PASSTHROUGH if k in os.environ}
+    # Guard rails against the running git config / interactive prompts
+    # leaking into helper subprocesses that shell out to git.
+    env.setdefault("GIT_TERMINAL_PROMPT", "0")
+    env.setdefault("GIT_CONFIG_NOSYSTEM", "1")
+    return env
 
 
 TOOL_SPECS: list[dict[str, Any]] = [
@@ -319,9 +373,23 @@ def _parse_install_spec(name: str, raw: Any) -> tuple[str, ...]:
                 f"helper {name!r} install args are capped at "
                 f"{MAX_HELPER_ARG_CHARS} chars each"
             )
+        if arg.startswith("-"):
+            # Pip flags: explicit allowlist. Reject anything that lets the
+            # repo redirect pip at attacker-controlled indexes or VCS URLs.
+            if arg in _INSTALL_ALLOWED_FLAGS:
+                continue
+            for bad in _INSTALL_DENY_FLAG_PREFIXES:
+                if arg == bad or arg.startswith(bad + "="):
+                    raise ValueError(
+                        f"helper {name!r} install flag {arg!r} is not allowed"
+                    )
+            raise ValueError(
+                f"helper {name!r} install flag {arg!r} is not in the allowlist"
+            )
         if not _INSTALL_ARG_RE.match(arg):
             raise ValueError(
-                f"helper {name!r} install arg {arg!r} contains disallowed characters"
+                f"helper {name!r} install arg {arg!r} contains disallowed "
+                "characters (VCS / URL installs are not permitted)"
             )
     return tuple(parts)
 
@@ -395,6 +463,7 @@ def _run_helper_install(helper: RepoHelperTool) -> HelperInstallResult:
             text=True,
             timeout=INSTALL_TIMEOUT_SECONDS,
             check=False,
+            env=_helper_subprocess_env(),
         )
     except subprocess.TimeoutExpired:
         return HelperInstallResult(
@@ -730,6 +799,7 @@ def _run_repo_helper(
             text=True,
             timeout=helper.timeout_seconds,
             check=False,
+            env=_helper_subprocess_env(),
         )
     except subprocess.TimeoutExpired as exc:
         raise _ToolError(
@@ -738,17 +808,42 @@ def _run_repo_helper(
     except FileNotFoundError as exc:
         raise _ToolError(f"helper command not found: {helper.command[0]!r}") from exc
 
-    stdout = proc.stdout.strip()
-    stderr = proc.stderr.strip()
+    # Helper output is attacker-influenced (the helper runs against the
+    # PR's tree). Wrap stdout/stderr in explicit untrusted markers so the
+    # model has a clear boundary; the system prompt already tells it not
+    # to follow instructions found inside tool output.
+    stdout = _scrub_helper_delimiters(proc.stdout.strip())
+    stderr = _scrub_helper_delimiters(proc.stderr.strip())
     sections = [
         f"{helper.name} (cwd {rel_cwd})",
         f"exit_code: {proc.returncode}",
         "command: " + " ".join(command),
     ]
     if stdout:
-        sections.append("stdout:\n" + stdout)
+        sections.append(
+            "--- BEGIN UNTRUSTED HELPER STDOUT ---\n"
+            + stdout
+            + "\n--- END UNTRUSTED HELPER STDOUT ---"
+        )
     if stderr:
-        sections.append("stderr:\n" + stderr)
+        sections.append(
+            "--- BEGIN UNTRUSTED HELPER STDERR ---\n"
+            + stderr
+            + "\n--- END UNTRUSTED HELPER STDERR ---"
+        )
     if not stdout and not stderr:
         sections.append("(no output)")
     return _truncate("\n\n".join(sections))
+
+
+def _scrub_helper_delimiters(text: str) -> str:
+    """Defang the BEGIN/END markers if the helper happened to emit them
+    in its own output."""
+    if not text:
+        return text
+    for needle in (
+        "--- BEGIN UNTRUSTED",
+        "--- END UNTRUSTED",
+    ):
+        text = text.replace(needle, needle[:3] + "​" + needle[3:])
+    return text

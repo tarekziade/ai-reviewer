@@ -190,12 +190,43 @@ as "line" in your JSON output, paired with side "RIGHT" or "LEFT".
 
 MAX_BODY_CHARS = 4000
 MAX_TITLE_CHARS = 500
+MAX_TRIGGER_COMMENT_CHARS = 4000
 
 
 def _truncate(text: str, limit: int) -> str:
     if len(text) <= limit:
         return text
     return text[:limit] + f"\n[... truncated, {len(text) - limit} chars omitted ...]"
+
+
+# Sequences a malicious PR body / diff line could use to spoof the
+# boundary markers around untrusted blocks (see USER_PROMPT_TEMPLATE).
+# We don't try to be exhaustive — collapsing the marker prefix is enough
+# to defang it regardless of which block the attacker is impersonating.
+_PROMPT_DELIMITER_NEEDLES = (
+    "--- BEGIN UNTRUSTED",
+    "--- END UNTRUSTED",
+    "--- BEGIN RUNNER CONTEXT",
+    "--- END RUNNER CONTEXT",
+    "--- BEGIN REPO-PROVIDED CONTEXT",
+    "--- END REPO-PROVIDED CONTEXT",
+    "── IMMUTABLE CONSTRAINTS",
+)
+
+
+def _scrub_delimiters(text: str) -> str:
+    """Defang prompt-delimiter markers that appear inside attacker-
+    controlled content. A PR body or diff line cannot be allowed to look
+    like one of our boundary lines or the model may treat following
+    content as trusted."""
+    if not text:
+        return text
+    out = text
+    for needle in _PROMPT_DELIMITER_NEEDLES:
+        # Insert a zero-width space after the leading "---" / "──" so the
+        # marker visibly differs from the real one but is still readable.
+        out = out.replace(needle, needle[:3] + "​" + needle[3:])
+    return out
 
 
 def build_system_prompt(review_rules: str, *, tools_enabled: bool = True) -> str:
@@ -240,12 +271,14 @@ def build_user_prompt(
     return USER_PROMPT_TEMPLATE.format(
         repo_full_name=repo_full_name,
         number=number,
-        title=_truncate(title or "(no title)", MAX_TITLE_CHARS),
-        body=_truncate(body or "(no description)", MAX_BODY_CHARS),
+        title=_scrub_delimiters(_truncate(title or "(no title)", MAX_TITLE_CHARS)),
+        body=_scrub_delimiters(_truncate(body or "(no description)", MAX_BODY_CHARS)),
         author=author,
         commenter=commenter,
-        trigger_comment=trigger_comment,
-        diff=diff,
+        trigger_comment=_scrub_delimiters(
+            _truncate(trigger_comment or "", MAX_TRIGGER_COMMENT_CHARS)
+        ),
+        diff=_scrub_delimiters(diff),
         runner_context_block=runner_context_block,
         extra_context_block=extra_context_block,
         today_iso=today.isoformat(),
