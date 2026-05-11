@@ -1,9 +1,12 @@
-"""Sandboxed file-browsing tools exposed to the reviewer LLM.
+"""Sandboxed repo tools exposed to the reviewer LLM.
 
 Each tool operates against a single repository checkout root. All paths
 are resolved via realpath and rejected if they escape the root, and a
 small denylist of noisy directories (``.git``, ``node_modules``, etc.) is
-hidden from the model so it can't accidentally pull in junk.
+hidden from the model so it can't accidentally pull in junk. Repos may
+also expose a small set of trusted helper commands via a default-branch
+JSON config; those run without a shell and are still rooted inside the
+checked-out repo.
 
 The module is decoupled from the LLM client: it just exposes
 ``TOOL_SPECS`` (the OpenAI-style schemas) and ``run_tool``, which takes a
@@ -13,11 +16,14 @@ will see as the ``tool`` message content.
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
 import subprocess
-from dataclasses import dataclass
+import sys
+import threading
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse
 
@@ -57,6 +63,19 @@ MAX_FETCH_BODY_CHARS = 4000
 # Network timeout for fetch_url. Shorter than the LLM streaming budget
 # so a slow URL doesn't delay an iteration much.
 FETCH_TIMEOUT_SECONDS = 10
+MAX_HELPER_ARGS = 32
+MAX_HELPER_ARG_CHARS = 200
+MAX_HELPER_TIMEOUT_SECONDS = 120
+_HELPER_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
+
+# Allowlist of installers a repo can declare in `install`. We map each one
+# to a python-API invocation in `_run_helper_install` so the reviewer
+# doesn't depend on the installer being on PATH and so the install lands
+# in this process's interpreter.
+_ALLOWED_INSTALLERS = frozenset({"pip"})
+MAX_HELPER_INSTALL_ARGS = 16
+INSTALL_TIMEOUT_SECONDS = 300
+_INSTALL_ARG_RE = re.compile(r"^[A-Za-z0-9._\-+=/@:~,\[\]]+$")
 
 
 TOOL_SPECS: list[dict[str, Any]] = [
@@ -171,6 +190,267 @@ TOOL_SPECS: list[dict[str, Any]] = [
     },
 ]
 
+_BUILTIN_TOOL_NAMES = frozenset(
+    spec["function"]["name"] for spec in TOOL_SPECS
+)
+
+
+@dataclass(frozen=True)
+class RepoHelperTool:
+    name: str
+    description: str
+    command: tuple[str, ...]
+    cwd: str = "."
+    allow_args: bool = False
+    max_args: int = 0
+    timeout_seconds: int = 20
+    # Optional installer hook. First element is one of _ALLOWED_INSTALLERS
+    # (e.g. "pip"); the rest are args passed to that installer. Empty
+    # tuple means the helper is expected to already be on PATH.
+    install: tuple[str, ...] = ()
+
+
+def load_repo_helper_tools(raw: str | None) -> list[RepoHelperTool]:
+    if not raw or not raw.strip():
+        return []
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"helper tools config is not valid JSON: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("helper tools config must be a JSON object")
+    raw_helpers = parsed.get("helpers")
+    if raw_helpers is None:
+        return []
+    if not isinstance(raw_helpers, list):
+        raise ValueError("helper tools config field 'helpers' must be a list")
+
+    helpers: list[RepoHelperTool] = []
+    seen_names: set[str] = set()
+    for idx, item in enumerate(raw_helpers, start=1):
+        if not isinstance(item, dict):
+            raise ValueError(f"helper #{idx} must be an object")
+        name = item.get("name")
+        if not isinstance(name, str) or not _HELPER_NAME_RE.match(name):
+            raise ValueError(
+                f"helper #{idx} has invalid name {name!r}; use [A-Za-z][A-Za-z0-9_-]*"
+            )
+        if name in _BUILTIN_TOOL_NAMES:
+            raise ValueError(f"helper name {name!r} conflicts with a built-in tool")
+        if name in seen_names:
+            raise ValueError(f"helper name {name!r} is duplicated")
+        seen_names.add(name)
+
+        description = item.get("description")
+        if not isinstance(description, str) or not description.strip():
+            raise ValueError(f"helper {name!r} is missing a non-empty description")
+
+        command = item.get("command")
+        if not isinstance(command, list) or not command or not all(
+            isinstance(part, str) and part.strip() for part in command
+        ):
+            raise ValueError(
+                f"helper {name!r} must declare a non-empty string array 'command'"
+            )
+
+        cwd = item.get("cwd", ".")
+        if not isinstance(cwd, str) or not cwd.strip():
+            raise ValueError(f"helper {name!r} has invalid cwd")
+
+        allow_args = bool(item.get("allow_args", False))
+        default_max_args = 8 if allow_args else 0
+        max_args = int(item.get("max_args", default_max_args))
+        if max_args < 0 or max_args > MAX_HELPER_ARGS:
+            raise ValueError(
+                f"helper {name!r} max_args must be between 0 and {MAX_HELPER_ARGS}"
+            )
+        if not allow_args and max_args:
+            raise ValueError(f"helper {name!r} cannot set max_args when allow_args=false")
+
+        timeout_seconds = int(item.get("timeout_seconds", 20))
+        if timeout_seconds < 1 or timeout_seconds > MAX_HELPER_TIMEOUT_SECONDS:
+            raise ValueError(
+                f"helper {name!r} timeout_seconds must be between 1 and "
+                f"{MAX_HELPER_TIMEOUT_SECONDS}"
+            )
+
+        install = _parse_install_spec(name, item.get("install"))
+
+        helpers.append(
+            RepoHelperTool(
+                name=name,
+                description=description.strip(),
+                command=tuple(part.strip() for part in command),
+                cwd=cwd.strip(),
+                allow_args=allow_args,
+                max_args=max_args,
+                timeout_seconds=timeout_seconds,
+                install=install,
+            )
+        )
+    return helpers
+
+
+def _parse_install_spec(name: str, raw: Any) -> tuple[str, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or not raw or not all(
+        isinstance(part, str) and part.strip() for part in raw
+    ):
+        raise ValueError(
+            f"helper {name!r} 'install' must be a non-empty array of non-empty strings"
+        )
+    parts = [part.strip() for part in raw]
+    installer = parts[0]
+    if installer not in _ALLOWED_INSTALLERS:
+        raise ValueError(
+            f"helper {name!r} install command must start with one of "
+            f"{sorted(_ALLOWED_INSTALLERS)}, got {installer!r}"
+        )
+    args = parts[1:]
+    if len(args) > MAX_HELPER_INSTALL_ARGS:
+        raise ValueError(
+            f"helper {name!r} install accepts at most "
+            f"{MAX_HELPER_INSTALL_ARGS} arguments"
+        )
+    for arg in args:
+        if len(arg) > MAX_HELPER_ARG_CHARS:
+            raise ValueError(
+                f"helper {name!r} install args are capped at "
+                f"{MAX_HELPER_ARG_CHARS} chars each"
+            )
+        if not _INSTALL_ARG_RE.match(arg):
+            raise ValueError(
+                f"helper {name!r} install arg {arg!r} contains disallowed characters"
+            )
+    return tuple(parts)
+
+
+@dataclass(frozen=True)
+class HelperInstallResult:
+    name: str
+    ok: bool
+    message: str
+
+
+# Process-local cache: each unique install spec runs at most once per
+# worker. pip is idempotent, but we re-bill the install time on every
+# review otherwise — and on a long-lived web worker that adds up.
+_INSTALL_CACHE_LOCK = threading.Lock()
+_INSTALL_CACHE: dict[tuple[str, ...], HelperInstallResult] = {}
+
+
+def install_helper_tools(
+    helpers: list[RepoHelperTool],
+) -> list[HelperInstallResult]:
+    """Run the install hook for each helper that declares one.
+
+    Returns one result per helper that had an install spec; helpers
+    without `install` are skipped silently. Failures are logged but not
+    raised — if the package isn't actually installed the helper's first
+    tool call will surface the error to the model, which is more
+    informative than aborting the whole review.
+    """
+    results: list[HelperInstallResult] = []
+    for helper in helpers:
+        if not helper.install:
+            continue
+        with _INSTALL_CACHE_LOCK:
+            cached = _INSTALL_CACHE.get(helper.install)
+        if cached is not None:
+            results.append(
+                HelperInstallResult(
+                    name=helper.name,
+                    ok=cached.ok,
+                    message=f"{helper.name}: {cached.message} (cached)",
+                )
+            )
+            continue
+        result = _run_helper_install(helper)
+        with _INSTALL_CACHE_LOCK:
+            # Only cache successes — failed installs may be transient
+            # (network blip, pypi flake) and we want a retry to refresh.
+            if result.ok:
+                _INSTALL_CACHE[helper.install] = result
+        results.append(result)
+    return results
+
+
+def _run_helper_install(helper: RepoHelperTool) -> HelperInstallResult:
+    installer = helper.install[0]
+    args = list(helper.install[1:])
+    if installer == "pip":
+        cmd = [sys.executable, "-m", "pip", *args]
+    else:  # pragma: no cover — validated in _parse_install_spec
+        return HelperInstallResult(
+            name=helper.name,
+            ok=False,
+            message=f"unsupported installer {installer!r}",
+        )
+    log.info("installing helper %s via: %s", helper.name, " ".join(cmd))
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=INSTALL_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return HelperInstallResult(
+            name=helper.name,
+            ok=False,
+            message=f"install timed out after {INSTALL_TIMEOUT_SECONDS}s",
+        )
+    except FileNotFoundError as exc:
+        return HelperInstallResult(
+            name=helper.name,
+            ok=False,
+            message=f"install failed: {exc}",
+        )
+    if proc.returncode != 0:
+        tail = (proc.stderr.strip() or proc.stdout.strip())[-300:]
+        return HelperInstallResult(
+            name=helper.name,
+            ok=False,
+            message=f"install exited {proc.returncode}: {tail}",
+        )
+    return HelperInstallResult(
+        name=helper.name,
+        ok=True,
+        message=f"installed via {installer} ({' '.join(args)})",
+    )
+
+
+def build_tool_specs(env: "ToolEnv") -> list[dict[str, Any]]:
+    specs = list(TOOL_SPECS)
+    for helper in env.helper_tools.values():
+        properties: dict[str, Any] = {}
+        if helper.allow_args:
+            properties["args"] = {
+                "type": "array",
+                "description": (
+                    "Additional CLI arguments appended after the helper's "
+                    f"configured command. Max {helper.max_args} items."
+                ),
+                "items": {"type": "string"},
+            }
+        specs.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": helper.name,
+                    "description": helper.description,
+                    "parameters": {
+                        "type": "object",
+                        "additionalProperties": False,
+                        "properties": properties,
+                    },
+                },
+            }
+        )
+    return specs
+
 
 @dataclass
 class ToolEnv:
@@ -178,6 +458,7 @@ class ToolEnv:
     review and threaded into ``run_tool``."""
 
     repo_root: str
+    helper_tools: dict[str, RepoHelperTool] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.repo_root = os.path.realpath(self.repo_root)
@@ -198,6 +479,9 @@ def run_tool(env: ToolEnv, name: str, arguments: dict[str, Any]) -> str:
             return _grep(env, arguments)
         if name == "fetch_url":
             return _fetch_url(arguments)
+        helper = env.helper_tools.get(name)
+        if helper is not None:
+            return _run_repo_helper(env, helper, arguments)
         return f"error: unknown tool {name!r}"
     except _ToolError as exc:
         return f"error: {exc}"
@@ -389,3 +673,82 @@ def _fetch_url(args: dict[str, Any]) -> str:
         if len(text) > MAX_FETCH_BODY_CHARS:
             body += f"\n[... truncated; full body was {len(text)} chars ...]"
     return _truncate("\n".join(header_lines) + "\n\n" + body)
+
+
+def _resolve_helper_command(env: ToolEnv, raw: str) -> str:
+    if "/" not in raw:
+        return raw
+    path = _resolve_path(env, raw, default="")
+    if not os.path.isfile(path):
+        raise _ToolError(f"helper command path is not a file: {raw}")
+    return path
+
+
+def _parse_helper_args(
+    helper: RepoHelperTool, args: dict[str, Any]
+) -> list[str]:
+    extra = args.get("args")
+    if extra is None:
+        return []
+    if not helper.allow_args:
+        raise _ToolError(f"helper {helper.name!r} does not accept additional args")
+    if not isinstance(extra, list) or not all(isinstance(item, str) for item in extra):
+        raise _ToolError("args must be an array of strings")
+    if len(extra) > helper.max_args:
+        raise _ToolError(
+            f"helper {helper.name!r} accepts at most {helper.max_args} additional args"
+        )
+    cleaned: list[str] = []
+    for item in extra:
+        if not item:
+            raise _ToolError("helper args may not be empty strings")
+        if len(item) > MAX_HELPER_ARG_CHARS:
+            raise _ToolError(
+                f"helper args are capped at {MAX_HELPER_ARG_CHARS} chars each"
+            )
+        if "\x00" in item:
+            raise _ToolError("helper args may not contain NUL bytes")
+        cleaned.append(item)
+    return cleaned
+
+
+def _run_repo_helper(
+    env: ToolEnv, helper: RepoHelperTool, args: dict[str, Any]
+) -> str:
+    cwd = _resolve_path(env, helper.cwd, default=".")
+    if not os.path.isdir(cwd):
+        raise _ToolError(f"helper cwd is not a directory: {helper.cwd!r}")
+
+    extra_args = _parse_helper_args(helper, args)
+    command = [_resolve_helper_command(env, helper.command[0]), *helper.command[1:], *extra_args]
+    rel_cwd = os.path.relpath(cwd, env.repo_root) or "."
+    try:
+        proc = subprocess.run(
+            command,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=helper.timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise _ToolError(
+            f"helper {helper.name!r} timed out after {helper.timeout_seconds}s"
+        ) from exc
+    except FileNotFoundError as exc:
+        raise _ToolError(f"helper command not found: {helper.command[0]!r}") from exc
+
+    stdout = proc.stdout.strip()
+    stderr = proc.stderr.strip()
+    sections = [
+        f"{helper.name} (cwd {rel_cwd})",
+        f"exit_code: {proc.returncode}",
+        "command: " + " ".join(command),
+    ]
+    if stdout:
+        sections.append("stdout:\n" + stdout)
+    if stderr:
+        sections.append("stderr:\n" + stderr)
+    if not stdout and not stderr:
+        sections.append("(no output)")
+    return _truncate("\n\n".join(sections))

@@ -43,6 +43,10 @@ inputs:
     description: 'Path to repo-specific review rules, read from the default branch.'
     required: false
     default: '.ai/review-rules.md'
+  helper_tools_path:
+    description: 'Path to a repo-specific helper-tools JSON file, read from the default branch. Helpers can expose tightly scoped CLI commands to the reviewer when a local PR checkout is available.'
+    required: false
+    default: '.ai/review-tools.json'
   default_review_rules:
     description: 'Fallback rules used when the repo has no review-rules file.'
     required: false
@@ -98,6 +102,7 @@ runs:
         REVIEW_EVENT: ${{ inputs.review_event }}
         MAX_DIFF_CHARS: ${{ inputs.max_diff_chars }}
         REVIEW_RULES_PATH: ${{ inputs.review_rules_path }}
+        HELPER_TOOLS_PATH: ${{ inputs.helper_tools_path }}
         DEFAULT_REVIEW_RULES: ${{ inputs.default_review_rules }}
         CONTEXT_SCRIPT_PATH: ${{ inputs.context_script_path }}
         CONTEXT_SCRIPT_TIMEOUT: ${{ inputs.context_script_timeout }}

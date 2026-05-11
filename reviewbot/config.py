@@ -48,6 +48,7 @@ class Config:
     review_event: str
     max_diff_chars: int
     review_rules_path: str
+    helper_tools_path: str
     default_review_rules: str
     allow_approve: bool
     persona_header: str
@@ -158,6 +159,7 @@ class Config:
             review_event=os.environ.get("REVIEW_EVENT", "COMMENT"),
             max_diff_chars=_int_env("MAX_DIFF_CHARS", 200000),
             review_rules_path=os.environ.get("REVIEW_RULES_PATH", ".ai/review-rules.md"),
+            helper_tools_path=os.environ.get("HELPER_TOOLS_PATH", ".ai/review-tools.json"),
             default_review_rules=os.environ.get(
                 "DEFAULT_REVIEW_RULES",
                 "Apply general Python correctness and security standards.",

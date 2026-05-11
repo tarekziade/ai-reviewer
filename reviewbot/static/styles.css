@@ -62,6 +62,22 @@ header.bar a.brand h1 {
   text-decoration: none;
 }
 header.bar a.brand:hover { opacity: 0.7; }
+header.bar .brand-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.powered-by {
+  font-size: 0.78rem;
+  color: var(--muted);
+}
+.powered-by a {
+  color: var(--muted);
+  text-decoration: none;
+  border-bottom: 1px dotted var(--muted);
+}
+.powered-by a:hover { color: var(--fg); }
 
 h1, h2 { margin-top: 0; }
 

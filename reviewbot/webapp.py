@@ -6,6 +6,7 @@ GitHub App identity — OAuth is only used for access control.
 """
 import asyncio
 import dataclasses
+import html as _html
 import json as _json
 import logging
 import os
@@ -363,7 +364,27 @@ def _require_user(request: Request) -> str:
 def _serve_static(name: str) -> HTMLResponse:
     path = os.path.join(_STATIC_DIR, name)
     with open(path, "r", encoding="utf-8") as f:
-        return HTMLResponse(f.read())
+        html = f.read()
+    if name.endswith(".html"):
+        html = html.replace("<!-- POWERED_BY -->", _powered_by_html())
+    return HTMLResponse(html)
+
+
+def _powered_by_html() -> str:
+    """Render the "powered by <model>" badge that sits next to the Serge
+    brand. Returns an empty string when llm_model is unset (the reviewer
+    auto-discovers a model from the endpoint in that case, so there's
+    nothing concrete to credit yet)."""
+    model = (cfg.llm_model or "").strip()
+    if not model:
+        return ""
+    url = f"https://huggingface.co/{model}"
+    return (
+        '<span class="powered-by">powered by '
+        f'<a href="{_html.escape(url, quote=True)}" '
+        f'target="_blank" rel="noopener noreferrer">'
+        f'{_html.escape(model)}</a></span>'
+    )
 
 
 @app.get("/healthz")

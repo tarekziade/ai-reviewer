@@ -29,6 +29,7 @@ def _make_cfg(**overrides) -> Config:
         review_event="COMMENT",
         max_diff_chars=200000,
         review_rules_path=".ai/review-rules.md",
+        helper_tools_path=".ai/review-tools.json",
         default_review_rules="",
         allow_approve=False,
         persona_header="🤗 **Serge** says:",

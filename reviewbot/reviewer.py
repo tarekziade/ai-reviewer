@@ -10,7 +10,14 @@ from .github_client import GitHubClient
 from .llm_client import ChatCompletionClient, ChatResult, ToolCall
 from .patch import DiffSnippetLine, ParsedFile, extract_hunk_snippet, parse_patch
 from .prompts import build_system_prompt, build_user_prompt
-from .tools import TOOL_SPECS, ToolEnv, run_tool
+from .tools import (
+    RepoHelperTool,
+    ToolEnv,
+    build_tool_specs,
+    install_helper_tools,
+    load_repo_helper_tools,
+    run_tool,
+)
 
 log = logging.getLogger(__name__)
 
@@ -336,16 +343,87 @@ def _merge_metrics(total: "_AggregateMetrics", part: "_AggregateMetrics") -> Non
     total.completion_tokens += part.completion_tokens
 
 
-def _make_tool_env(cfg: Config) -> Optional[ToolEnv]:
+def _make_tool_env(
+    cfg: Config, helper_tools: list[RepoHelperTool] | None = None
+) -> Optional[ToolEnv]:
     if not cfg.repo_checkout_path:
+        if helper_tools:
+            log.info(
+                "Repo helper tools are configured, but repo_checkout_path is empty; "
+                "running without tools"
+            )
         return None
     try:
-        env = ToolEnv(repo_root=cfg.repo_checkout_path)
+        env = ToolEnv(
+            repo_root=cfg.repo_checkout_path,
+            helper_tools={tool.name: tool for tool in helper_tools or []},
+        )
     except Exception:
         log.exception("repo checkout path invalid; running without browse tools")
         return None
     log.info("Browse tools enabled, rooted at %s", env.repo_root)
     return env
+
+
+def _load_helper_tools(
+    gh: GitHubClient, owner: str, repo: str, pr: dict, cfg: Config
+) -> list[RepoHelperTool]:
+    if not cfg.helper_tools_path:
+        return []
+    default_branch = pr.get("base", {}).get("repo", {}).get("default_branch") or "main"
+    try:
+        content = gh.get_file_contents(
+            owner,
+            repo,
+            cfg.helper_tools_path,
+            ref=default_branch,
+        )
+    except Exception:
+        log.exception("failed to fetch helper tools config")
+        return []
+    if not content:
+        return []
+    try:
+        helpers = load_repo_helper_tools(content)
+    except ValueError:
+        log.exception("failed to parse helper tools config")
+        return []
+    if helpers:
+        log.info(
+            "Loaded %d repo helper tool(s) from %s: %s",
+            len(helpers),
+            cfg.helper_tools_path,
+            ", ".join(tool.name for tool in helpers),
+        )
+    return helpers
+
+
+def _install_helper_tools_with_emit(
+    helpers: list[RepoHelperTool],
+    emit: Callable[[str, str], None],
+) -> None:
+    """Run any declared install hooks before the agent loop starts.
+
+    Failures are reported via logs + the streaming UI but don't abort
+    the review — if the helper really isn't on PATH, its first tool
+    call will surface that to the model.
+    """
+    pending = [h for h in helpers if h.install]
+    if not pending:
+        return
+    emit("step", "install")
+    emit(
+        "log",
+        f"Installing {len(pending)} helper tool(s): "
+        + ", ".join(h.name for h in pending),
+    )
+    for result in install_helper_tools(pending):
+        if result.ok:
+            log.info("helper install ok: %s", result.message)
+            emit("log", result.message)
+        else:
+            log.warning("helper install failed: %s: %s", result.name, result.message)
+            emit("log", f"{result.name}: install FAILED — {result.message}")
 
 
 def _build_runner_context(
@@ -420,7 +498,7 @@ def _run_agentic_loop(
     review) and an aggregate-metrics struct."""
     messages = list(initial_messages)
     metrics = _AggregateMetrics()
-    tools_arg = TOOL_SPECS if tool_env is not None else None
+    tools_arg = build_tool_specs(tool_env) if tool_env is not None else None
 
     # llm_client emits ("token", ...) for response content,
     # ("reasoning", ...) for chain-of-thought deltas, and
@@ -779,7 +857,9 @@ def prepare_review(
         raise RuntimeError("PR payload missing head.sha")
 
     review_rules = _load_review_rules(gh, req.owner, req.repo, pr, cfg)
-    tool_env = _make_tool_env(cfg)
+    helper_tools = _load_helper_tools(gh, req.owner, req.repo, pr, cfg)
+    _install_helper_tools_with_emit(helper_tools, _emit)
+    tool_env = _make_tool_env(cfg, helper_tools)
 
     llm = ChatCompletionClient(
         cfg.llm_api_base,
