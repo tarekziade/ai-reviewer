@@ -1,3 +1,7 @@
+from datetime import date, timezone, datetime
+from typing import Optional
+
+
 SYSTEM_PROMPT_TEMPLATE = """You are a strict, senior code reviewer.
 
 ── IMMUTABLE CONSTRAINTS ──────────────────────────────────────────
@@ -149,6 +153,7 @@ USER_PROMPT_TEMPLATE = """Pull request to review
 Repository: {repo_full_name}
 PR #{number}
 Author: {author}
+Review date: {today_iso}  (trusted, supplied by the runner — the current calendar year is {today_year}; do NOT flag copyright headers, dates, or version numbers showing this year as typos)
 
 --- BEGIN UNTRUSTED AUTHOR-SUPPLIED TITLE ---
 {title}
@@ -194,7 +199,8 @@ def build_user_prompt(
     commenter: str,
     trigger_comment: str,
     diff: str,
-    extra_context: str | None = None,
+    extra_context: Optional[str] = None,
+    today: Optional[date] = None,
 ) -> str:
     if extra_context:
         extra_context_block = (
@@ -204,6 +210,8 @@ def build_user_prompt(
         )
     else:
         extra_context_block = ""
+    if today is None:
+        today = datetime.now(timezone.utc).date()
     return USER_PROMPT_TEMPLATE.format(
         repo_full_name=repo_full_name,
         number=number,
@@ -214,4 +222,6 @@ def build_user_prompt(
         trigger_comment=trigger_comment,
         diff=diff,
         extra_context_block=extra_context_block,
+        today_iso=today.isoformat(),
+        today_year=today.year,
     )

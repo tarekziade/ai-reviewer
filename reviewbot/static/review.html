@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Serge · live review</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="bar">
+    <a href="/" class="brand"><h1>🤗 Serge</h1></a>
+    <div class="right">
+      <span id="target"></span>
+      <span class="status-badge" id="status">running</span>
+      <button class="secondary" id="rerun-btn" title="Re-run with the same PR + comment">Review again</button>
+      <a href="/"><button class="secondary">New review</button></a>
+    </div>
+  </header>
+  <main>
+    <div id="error-banner"></div>
+
+    <section class="card">
+      <ol class="progress" id="progress">
+        <li class="step pending" data-step="clone"><span class="num">1</span><span class="label">Clone</span></li>
+        <li class="step pending" data-step="fetch"><span class="num">2</span><span class="label">Fetch PR</span></li>
+        <li class="step pending" data-step="context"><span class="num">3</span><span class="label">Context</span></li>
+        <li class="step pending" data-step="llm"><span class="num">4</span><span class="label">LLM <span class="detail" id="llm-detail"></span></span></li>
+        <li class="step pending" data-step="done"><span class="num">5</span><span class="label">Done</span></li>
+      </ol>
+      <div class="progress-bar"><div class="progress-bar-fill" id="progress-fill"></div></div>
+    </section>
+
+    <section class="card">
+      <details id="stream-details" open>
+        <summary><h2 style="display: inline-block; margin: 0;">Live stream</h2></summary>
+        <pre class="console" id="console"></pre>
+      </details>
+      <div class="token-bar" id="token-bar">
+        <span class="metric"><span class="metric-label">in</span> <span id="tok-in">0</span></span>
+        <span class="metric"><span class="metric-label">out</span> <span id="tok-out">0</span></span>
+        <span class="metric"><span class="metric-label">rate</span> <span id="tok-rate">—</span> tok/s</span>
+        <span class="metric"><span class="metric-label">tools</span> <span id="tok-tools">0</span></span>
+        <span class="metric"><span class="metric-label">elapsed</span> <span id="tok-elapsed">0.0</span>s</span>
+      </div>
+    </section>
+
+    <section class="card" id="edit-section" style="display: none;">
+      <h2>Review draft</h2>
+      <p class="hint" id="draft-meta"></p>
+
+      <div style="margin-bottom: 14px;">
+        <label for="summary">Summary</label>
+        <textarea id="summary" rows="8"></textarea>
+      </div>
+
+      <div style="margin-bottom: 14px;">
+        <label for="event">Review event</label>
+        <select id="event" style="padding: 8px 10px; border-radius: 6px; border: 1px solid var(--border); background: var(--bg); color: var(--fg); font: inherit;">
+          <option value="COMMENT">Comment</option>
+          <option value="REQUEST_CHANGES">Request changes</option>
+          <option value="APPROVE">Approve</option>
+        </select>
+      </div>
+
+      <h3>Inline comments (<span id="comments-count">0</span>)</h3>
+      <div id="comments-list"></div>
+
+      <div class="actions">
+        <button class="primary" id="publish-btn">Publish review</button>
+        <button class="danger" id="discard-btn">Discard fully</button>
+      </div>
+    </section>
+  </main>
+  <script src="/static/review.js" defer></script>
+</body>
+</html>

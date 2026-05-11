@@ -356,6 +356,57 @@ you're reviewing enough PRs that Actions minutes or queue time hurt.
 
 ---
 
+## Mode 3 — Interactive web app
+
+A small FastAPI app (`reviewbot-web`) lets a logged-in user kick off a
+review from a form, watch the LLM stream live in a console, then tweak
+the summary + per-comment text (or discard individual inline comments)
+before publishing. The published review still goes out under the
+GitHub App identity — OAuth is only used for access control.
+
+### Setup
+
+1. Install the web extras: `pip install -e '.[web]'`
+2. Register a **GitHub OAuth App** (Settings → Developer settings →
+   OAuth Apps → New OAuth App — this is *separate* from the GitHub App
+   used to post reviews). Callback URL: `http://localhost:8080/auth/callback`
+   for local testing.
+3. Make sure the **GitHub App** from Mode 2 is installed on each repo
+   you want to review.
+
+### Run it locally
+
+```bash
+LLM_API_KEY=...                          # same as the other modes
+GITHUB_APP_ID=...                        # same App as Mode 2
+GITHUB_PRIVATE_KEY_PATH=./private-key.pem
+GITHUB_OAUTH_CLIENT_ID=...               # the OAuth App's client id
+GITHUB_OAUTH_CLIENT_SECRET=...
+WEB_SESSION_SECRET=$(openssl rand -hex 32)
+WEB_ALLOWED_USERS=octocat,hubot          # comma-separated GitHub logins
+# or WEB_ALLOWED_ORG=acme,other-org
+reviewbot-web                            # listens on 0.0.0.0:8080
+```
+
+Then open `http://localhost:8080`, sign in with GitHub, fill in
+`owner/repo#123` + the trigger comment, and watch the stream.
+
+For pure local "I just want to click around" testing, set
+`DEV_NO_AUTH=1` to bypass OAuth (the OAuth env vars become optional).
+Don't ship that flag to production.
+
+### How it differs from Mode 2
+
+| Aspect                              | Mode 2 (webhook) | Mode 3 (web) |
+| ----------------------------------- | :--------------: | :----------: |
+| Trigger surface                     | GitHub comment   | Web form     |
+| Review posted automatically         | ✅              |              |
+| Human can edit before publishing    |                  | ✅          |
+| Multi-process / horizontal scaling  | ✅              |              |
+| Needs an inbound webhook URL        | ✅              |              |
+
+---
+
 ## LLM endpoint compatibility
 
 Any server that accepts

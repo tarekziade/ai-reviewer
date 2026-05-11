@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Serge · new review</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <header class="bar">
+    <a href="/" class="brand"><h1>🤗 Serge</h1></a>
+    <div class="right">
+      <form method="post" action="/auth/logout" style="margin:0">
+        <button type="submit" class="secondary">Sign out</button>
+      </form>
+    </div>
+  </header>
+  <main>
+    <div id="error-banner"></div>
+    <form class="card" id="submit-form">
+      <h2>Ask Serge to review a PR</h2>
+      <div style="margin-bottom: 14px;">
+        <label for="pr">Pull request</label>
+        <div class="hint">Examples: <code>owner/repo#123</code>, <code>https://github.com/owner/repo/pull/123</code></div>
+        <input type="text" id="pr" name="pr" required autofocus placeholder="owner/repo#123">
+      </div>
+      <div>
+        <label for="comment">Trigger comment</label>
+        <div class="hint">Plays the role of the comment you'd normally post on GitHub. Mention <code>@serge</code> + any extra instructions.</div>
+        <textarea id="comment" name="comment" rows="5" placeholder="@serge please focus on the new auth flow"></textarea>
+      </div>
+      <div class="presets">
+        <span class="hint">Presets:</span>
+        <button type="button" class="secondary preset" data-preset="first-pass">First-pass</button>
+        <button type="button" class="secondary preset" data-preset="new-model">New model addition</button>
+        <button type="button" class="secondary preset" data-preset="bugfix">Bug fix</button>
+        <button type="button" class="secondary preset" data-preset="docs">Documentation</button>
+      </div>
+      <div class="actions">
+        <button class="primary" type="submit" id="submit-btn">Start review</button>
+      </div>
+    </form>
+
+    <section class="card" id="jobs-section" style="display: none;">
+      <h2>Your reviews <span class="hint" id="jobs-count"></span></h2>
+      <p class="hint">In-memory only — anything older than 1h or pre-restart is gone.</p>
+      <table class="jobs-list">
+        <thead>
+          <tr>
+            <th>Status</th>
+            <th>Pull request</th>
+            <th>Started</th>
+          </tr>
+        </thead>
+        <tbody id="jobs-tbody"></tbody>
+      </table>
+    </section>
+  </main>
+  <script src="/static/index.js" defer></script>
+</body>
+</html>

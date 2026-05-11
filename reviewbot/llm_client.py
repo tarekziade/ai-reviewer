@@ -2,7 +2,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import requests
 
@@ -126,6 +126,7 @@ class ChatCompletionClient:
         tools: Optional[list[dict[str, Any]]] = None,
         tool_choice: Optional[Any] = None,
         extra: Optional[dict[str, Any]] = None,
+        chunk_callback: Optional[Callable[[str, str], None]] = None,
     ) -> ChatResult:
         payload: dict[str, Any] = {
             "model": self._resolve_model(),
@@ -154,10 +155,23 @@ class ChatCompletionClient:
             requests.Timeout,
             requests.exceptions.ChunkedEncodingError,
         )
+        # Pre-compute an input-token estimate so the web UI's "in"
+        # counter shows a value while the stream is still in flight —
+        # authoritative ``usage.prompt_tokens`` only arrives at
+        # end-of-stream. Cheap char-based heuristic; overwritten by
+        # the authoritative value once it lands.
+        est_input_tokens = self._estimate_input_tokens(messages, tools)
         started = time.monotonic()
         try:
             return self._post_with_retries(
-                url, payload, attempts, retryable, started, tools_in_use=bool(tools)
+                url,
+                payload,
+                attempts,
+                retryable,
+                started,
+                tools_in_use=bool(tools),
+                chunk_callback=chunk_callback,
+                est_input_tokens=est_input_tokens,
             )
         except _ToolsUnsupported:
             # Endpoint rejected the tool-augmented payload. Strip the
@@ -166,8 +180,43 @@ class ChatCompletionClient:
             for k in ("tools", "tool_choice"):
                 payload.pop(k, None)
             return self._post_with_retries(
-                url, payload, attempts, retryable, started, tools_in_use=False
+                url,
+                payload,
+                attempts,
+                retryable,
+                started,
+                tools_in_use=False,
+                chunk_callback=chunk_callback,
+                est_input_tokens=est_input_tokens,
             )
+
+    @staticmethod
+    def _estimate_input_tokens(
+        messages: list[dict[str, Any]], tools: Optional[list[dict[str, Any]]]
+    ) -> int:
+        """Char-based estimate of the prompt's token count (~4 chars/tok).
+        Counts every string in messages — content, tool-call arguments,
+        tool replies — and the tool schema JSON when tools are passed."""
+        chars = 0
+        for m in messages:
+            if not isinstance(m, dict):
+                continue
+            content = m.get("content")
+            if isinstance(content, str):
+                chars += len(content)
+            for tc in m.get("tool_calls") or ():
+                if not isinstance(tc, dict):
+                    continue
+                fn = tc.get("function") or {}
+                name = fn.get("name") or ""
+                args = fn.get("arguments") or ""
+                if isinstance(name, str):
+                    chars += len(name)
+                if isinstance(args, str):
+                    chars += len(args)
+        if tools:
+            chars += len(json.dumps(tools))
+        return chars // 4
 
     def _post_with_retries(
         self,
@@ -178,6 +227,8 @@ class ChatCompletionClient:
         started: float,
         *,
         tools_in_use: bool,
+        chunk_callback: Optional[Callable[[str, str], None]] = None,
+        est_input_tokens: int = 0,
     ) -> ChatResult:
         body = json.dumps(payload)
         for attempt in range(1, attempts + 1):
@@ -219,7 +270,11 @@ class ChatCompletionClient:
                         raise _ToolsUnsupported(body_preview)
                 r.raise_for_status()
                 if self.stream:
-                    content, usage, tool_calls, finish_reason = self._consume_stream(r)
+                    content, usage, tool_calls, finish_reason = self._consume_stream(
+                        r,
+                        chunk_callback=chunk_callback,
+                        est_input_tokens=est_input_tokens,
+                    )
                 else:
                     data = r.json()
                     choice = data["choices"][0]
@@ -228,6 +283,14 @@ class ChatCompletionClient:
                     usage = data.get("usage") or {}
                     tool_calls = _parse_tool_calls_from_message(message.get("tool_calls"))
                     finish_reason = choice.get("finish_reason")
+                    if chunk_callback is not None and content:
+                        # Non-streaming path: still emit the full content
+                        # in one piece so callers don't need a separate
+                        # code path for the buffered case.
+                        try:
+                            chunk_callback("token", content)
+                        except Exception:
+                            log.debug("chunk_callback raised; suppressing", exc_info=True)
             except retryable as exc:
                 if attempt == attempts:
                     log.error(
@@ -272,6 +335,13 @@ class ChatCompletionClient:
     # still arriving from the LLM (and lets us spot a hang vs a slow stream).
     PROGRESS_INTERVAL_SECONDS = 10.0
 
+    # How often to push an estimated-tokens "metrics" event to the chunk
+    # callback while a stream is in flight. The OpenAI streaming protocol
+    # only delivers authoritative `usage` at end-of-stream, so we estimate
+    # from byte counts (~4 chars per token) to give the UI a live counter.
+    LIVE_METRICS_INTERVAL_SECONDS = 0.75
+    LIVE_METRICS_CHARS_PER_TOKEN = 4
+
     # Delta keys that reasoning/thinking models stream their chain-of-thought
     # into (instead of `content`). We buffer these so we can periodically dump
     # the latest chunk into the action log — useful for watching what the
@@ -284,7 +354,11 @@ class ChatCompletionClient:
 
     @classmethod
     def _consume_stream(
-        cls, r: "requests.Response"
+        cls,
+        r: "requests.Response",
+        *,
+        chunk_callback: Optional[Callable[[str, str], None]] = None,
+        est_input_tokens: int = 0,
     ) -> tuple[str, dict[str, Any], list[ToolCall], Optional[str]]:
         """Parse an OpenAI-style SSE chat-completions stream.
 
@@ -321,6 +395,7 @@ class ChatCompletionClient:
         finish_reason: Optional[str] = None
         stream_started = time.monotonic()
         last_progress = stream_started
+        last_live_metrics = stream_started
         try:
             for raw in r.iter_lines(decode_unicode=True):
                 now = time.monotonic()
@@ -374,10 +449,60 @@ class ChatCompletionClient:
                             )
                             if key in cls.REASONING_DELTA_KEYS:
                                 reasoning_buffer.append(value)
+                                # Forward reasoning live so the web UI can
+                                # show the model's chain-of-thought as it
+                                # arrives (instead of only the periodic
+                                # log dump). Buffering + log flushes below
+                                # still happen so Action-mode logs stay
+                                # readable.
+                                if chunk_callback is not None:
+                                    try:
+                                        chunk_callback("reasoning", value)
+                                    except Exception:
+                                        log.debug(
+                                            "chunk_callback raised; suppressing",
+                                            exc_info=True,
+                                        )
                     piece = delta.get("content")
                     if isinstance(piece, str):
                         parts.append(piece)
                         chars += len(piece)
+                        if chunk_callback is not None and piece:
+                            try:
+                                chunk_callback("token", piece)
+                            except Exception:
+                                log.debug(
+                                    "chunk_callback raised; suppressing",
+                                    exc_info=True,
+                                )
+                # Periodic live-metrics estimate so the UI counter ticks
+                # during long reasoning streams. Authoritative `usage`
+                # arrives at end-of-stream and the caller will overwrite
+                # this estimate then.
+                if (
+                    chunk_callback is not None
+                    and now - last_live_metrics >= cls.LIVE_METRICS_INTERVAL_SECONDS
+                ):
+                    total_out_chars = chars + sum(len(s) for s in reasoning_buffer)
+                    est_out = total_out_chars // cls.LIVE_METRICS_CHARS_PER_TOKEN
+                    elapsed = now - stream_started
+                    try:
+                        chunk_callback(
+                            "stream_metrics",
+                            json.dumps(
+                                {
+                                    "in": est_input_tokens,
+                                    "out": est_out,
+                                    "seconds": round(elapsed, 1),
+                                }
+                            ),
+                        )
+                    except Exception:
+                        log.debug(
+                            "chunk_callback raised; suppressing",
+                            exc_info=True,
+                        )
+                    last_live_metrics = now
                     total_reasoning = sum(len(s) for s in reasoning_buffer)
                     if (
                         total_reasoning - reasoning_logged_chars

@@ -22,6 +22,13 @@ def _load_private_key() -> Optional[str]:
         return f.read()
 
 
+def _bool_env(name: str, default: bool = False) -> bool:
+    raw = (os.environ.get(name) or "").strip().lower()
+    if not raw:
+        return default
+    return raw in ("1", "true", "yes", "on")
+
+
 @dataclass
 class Config:
     # Only used in webhook mode (GitHub App). In Action mode the runner
@@ -52,37 +59,99 @@ class Config:
     repo_checkout_path: str
     tool_max_iterations: int
 
+    # Web-mode (reviewbot-web) settings. All optional in webhook/Action
+    # modes; required only when require_web=True.
+    github_oauth_client_id: Optional[str] = None
+    github_oauth_client_secret: Optional[str] = None
+    web_session_secret: Optional[str] = None
+    # Comma-separated lists. Either may be empty when DEV_NO_AUTH is on.
+    web_allowed_users: tuple[str, ...] = ()
+    web_allowed_orgs: tuple[str, ...] = ()
+    web_job_ttl_seconds: int = 3600
+    web_dev_no_auth: bool = False
+
     @classmethod
-    def from_env(cls, *, require_app: bool = True) -> "Config":
+    def from_env(
+        cls,
+        *,
+        require_app: bool = True,
+        require_web: bool = False,
+    ) -> "Config":
         app_id = os.environ.get("GITHUB_APP_ID")
         private_key = _load_private_key()
         webhook_secret = os.environ.get("GITHUB_WEBHOOK_SECRET")
 
-        if require_app:
-            missing = [
+        if require_app or require_web:
+            # Web mode also publishes via the App, so it needs the App
+            # credentials too — webhook secret is only required for the
+            # inbound-events surface.
+            required = [
+                ("GITHUB_APP_ID", app_id),
+                ("GITHUB_PRIVATE_KEY / GITHUB_PRIVATE_KEY_PATH", private_key),
+            ]
+            if require_app:
+                required.append(("GITHUB_WEBHOOK_SECRET", webhook_secret))
+            missing = [name for name, val in required if not val]
+            if missing:
+                mode = "webhook mode" if require_app else "web mode"
+                raise RuntimeError(
+                    f"Missing required env vars for {mode}: " + ", ".join(missing)
+                )
+
+        oauth_client_id = os.environ.get("GITHUB_OAUTH_CLIENT_ID") or None
+        oauth_client_secret = os.environ.get("GITHUB_OAUTH_CLIENT_SECRET") or None
+        session_secret = os.environ.get("WEB_SESSION_SECRET") or None
+        dev_no_auth = _bool_env("DEV_NO_AUTH", False)
+        allowed_users = tuple(
+            u.strip().lower()
+            for u in (os.environ.get("WEB_ALLOWED_USERS") or "").split(",")
+            if u.strip()
+        )
+        allowed_orgs = tuple(
+            o.strip().lower()
+            for o in (os.environ.get("WEB_ALLOWED_ORG") or "").split(",")
+            if o.strip()
+        )
+
+        if require_web and not dev_no_auth:
+            missing_web = [
                 name
                 for name, val in [
-                    ("GITHUB_APP_ID", app_id),
-                    ("GITHUB_PRIVATE_KEY / GITHUB_PRIVATE_KEY_PATH", private_key),
-                    ("GITHUB_WEBHOOK_SECRET", webhook_secret),
+                    ("GITHUB_OAUTH_CLIENT_ID", oauth_client_id),
+                    ("GITHUB_OAUTH_CLIENT_SECRET", oauth_client_secret),
+                    ("WEB_SESSION_SECRET", session_secret),
                 ]
                 if not val
             ]
-            if missing:
+            if missing_web:
                 raise RuntimeError(
-                    "Missing required env vars for webhook mode: " + ", ".join(missing)
+                    "Missing required env vars for web mode "
+                    "(set DEV_NO_AUTH=1 to bypass for local testing): "
+                    + ", ".join(missing_web)
+                )
+            if not allowed_users and not allowed_orgs:
+                raise RuntimeError(
+                    "Web mode requires WEB_ALLOWED_USERS and/or WEB_ALLOWED_ORG "
+                    "(comma-separated). Set DEV_NO_AUTH=1 to bypass for local testing."
                 )
 
         return cls(
             github_app_id=app_id,
             github_private_key=private_key,
             github_webhook_secret=webhook_secret,
-            llm_api_base=os.environ.get("LLM_API_BASE", "https://api.openai.com/v1").rstrip("/"),
+            llm_api_base=(
+                os.environ.get("LLM_BASE_URL")
+                or os.environ.get("LLM_API_BASE")
+                or "https://api.openai.com/v1"
+            ).rstrip("/"),
             llm_api_key=os.environ["LLM_API_KEY"],
             llm_model=os.environ.get("LLM_MODEL") or None,
             llm_bill_to=os.environ.get("LLM_BILL_TO") or None,
             llm_max_tokens=_int_env("LLM_MAX_TOKENS", 4096),
-            llm_stream=os.environ.get("LLM_STREAM", "").lower() in ("1", "true", "yes"),
+            # Streaming on by default — the web UI's live token counter
+            # and reasoning display rely on incremental SSE chunks. Set
+            # LLM_STREAM=0 to fall back to the buffered REST path.
+            llm_stream=_bool_env("LLM_STREAM", True),
             mention_trigger=os.environ.get("MENTION_TRIGGER", "@serge"),
             review_event=os.environ.get("REVIEW_EVENT", "COMMENT"),
             max_diff_chars=_int_env("MAX_DIFF_CHARS", 200000),
@@ -91,10 +160,20 @@ class Config:
                 "DEFAULT_REVIEW_RULES",
                 "Apply general Python correctness and security standards.",
             ),
-            allow_approve=os.environ.get("ALLOW_APPROVE", "").lower() in ("1", "true", "yes"),
+            allow_approve=_bool_env("ALLOW_APPROVE", False),
             persona_header=os.environ.get("PERSONA_HEADER", "🤗 **Serge** says:"),
             context_script_path=os.environ.get("CONTEXT_SCRIPT_PATH", ".ai/context-script"),
             context_script_timeout=_int_env("CONTEXT_SCRIPT_TIMEOUT", 30),
             repo_checkout_path=(os.environ.get("REPO_CHECKOUT_PATH") or "").strip(),
-            tool_max_iterations=_int_env("TOOL_MAX_ITERATIONS", 8),
+            # Set TOOL_MAX_ITERATIONS=0 to disable the cap entirely;
+            # otherwise the agentic loop bails out after this many turns
+            # and asks for a final answer with tools off.
+            tool_max_iterations=_int_env("TOOL_MAX_ITERATIONS", 15),
+            github_oauth_client_id=oauth_client_id,
+            github_oauth_client_secret=oauth_client_secret,
+            web_session_secret=session_secret,
+            web_allowed_users=allowed_users,
+            web_allowed_orgs=allowed_orgs,
+            web_job_ttl_seconds=_int_env("WEB_JOB_TTL_SECONDS", 3600),
+            web_dev_no_auth=dev_no_auth,
         )
