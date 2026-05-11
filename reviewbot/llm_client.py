@@ -292,6 +292,11 @@ class ChatCompletionClient:
                     choice = data["choices"][0]
                     message = choice.get("message") or {}
                     content = message.get("content") or ""
+                    # Same vendor-placeholder defense as the streaming
+                    # path: drop a "None"/"null" filler that some
+                    # inference stacks emit when tool calls are present.
+                    if isinstance(content, str) and content.strip() in ("None", "null"):
+                        content = ""
                     usage = data.get("usage") or {}
                     tool_calls = _parse_tool_calls_from_message(message.get("tool_calls"))
                     finish_reason = choice.get("finish_reason")
@@ -489,6 +494,14 @@ class ChatCompletionClient:
                                         )
                     piece = delta.get("content")
                     if isinstance(piece, str):
+                        # Some inference stacks (vLLM with certain tool
+                        # parsers, Kimi-K2 on HF Router) emit a literal
+                        # "None" / "null" content chunk as filler when
+                        # the model is firing tool calls without real
+                        # text output. Drop those so they don't end up
+                        # in chat.content or the live UI console.
+                        if piece.strip() in ("None", "null"):
+                            continue
                         parts.append(piece)
                         chars += len(piece)
                         if chunk_callback is not None and piece:
