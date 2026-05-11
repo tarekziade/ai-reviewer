@@ -4,6 +4,8 @@ __pycache__/
 .venv/
 venv/
 .env
+aws/reviewbot-web.env
+aws/.deploy-state.json
 *.pem
 .idea/
 .vscode/

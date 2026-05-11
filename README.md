@@ -382,6 +382,7 @@ GITHUB_APP_ID=...                        # same App as Mode 2
 GITHUB_PRIVATE_KEY_PATH=./private-key.pem
 GITHUB_OAUTH_CLIENT_ID=...               # the OAuth App's client id
 GITHUB_OAUTH_CLIENT_SECRET=...
+GITHUB_OAUTH_CALLBACK_URL=http://localhost:8080/auth/callback
 WEB_SESSION_SECRET=$(openssl rand -hex 32)
 WEB_ALLOWED_USERS=octocat,hubot          # comma-separated GitHub logins
 # or WEB_ALLOWED_ORG=acme,other-org
@@ -394,6 +395,30 @@ Then open `http://localhost:8080`, sign in with GitHub, fill in
 For pure local "I just want to click around" testing, set
 `DEV_NO_AUTH=1` to bypass OAuth (the OAuth env vars become optional).
 Don't ship that flag to production.
+
+### Single-VM AWS deployment
+
+This repo also ships a small EC2 bootstrap in [`aws/`](aws/README.md)
+for the interactive reviewboard app. It mirrors the dashboard
+deployment pattern: launch a single Amazon Linux 2023 host, clone the
+repo, install `.[web]`, copy an env file into
+`/etc/reviewbot/reviewbot-web.env`, and enable a `systemd` unit that
+starts the web app on port `8080`.
+
+If your local launch uses `GITHUB_PRIVATE_KEY_PATH=/path/to/pem`,
+`aws/deploy.sh` uploads that PEM and rewrites the deployed env file to
+use `/etc/reviewbot/github-app.pem`. The generated service runs the
+same `reviewbot-web` entrypoint you use locally.
+
+Usage:
+
+1. Copy `aws/reviewbot-web.env.example` to `aws/reviewbot-web.env`.
+2. Fill in the GitHub App, OAuth, and LLM credentials.
+3. Run `./aws/deploy.sh`.
+
+The generated service is `reviewbot-web.service`, so after boot you can
+inspect it with `systemctl status reviewbot-web` and
+`journalctl -u reviewbot-web`.
 
 ### How it differs from Mode 2
 
@@ -456,15 +481,18 @@ rewrite the rules as part of their PR.
 ```
 action.yml                       Composite Action manifest (Mode 1)
 pyproject.toml                   Package metadata, deps, console scripts
-.env.example                     Env template for Mode 2
+.env.example                     Env template for webhook and web modes
 .ai/review-rules.md              Repo-specific review guidance
 .ai/context-script               Optional repo-supplied context hook
+aws/                             EC2 bootstrap scripts for reviewbot-web
 reviewbot/
   action_runner.py   Action entry point — reads $GITHUB_EVENT_PATH
                      (console script: `reviewbot-action`)
   app.py             Flask webhook server (Mode 2)
                      (console script: `reviewbot-app`,
                       gunicorn target: `reviewbot.app:app`)
+  webapp.py          FastAPI reviewboard UI (Mode 3)
+                     (console script: `reviewbot-web`)
   triggers.py        Shared "should we review?" gating
   config.py          Env-driven config, App creds optional
   github_auth.py     App JWT + installation token (Mode 2 only)

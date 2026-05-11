@@ -1,8 +1,12 @@
 import unittest
 
+from reviewbot.patch import parse_patch
 from reviewbot.reviewer import (
+    _build_annotated_diff_chunks,
     _content_preview,
     _extract_json,
+    _merge_chunk_event,
+    _merge_chunk_summaries,
     _summarize_rejected_comments,
 )
 
@@ -108,6 +112,65 @@ class ContentPreviewTests(unittest.TestCase):
         out = _content_preview("x" * 1000, limit=100)
         self.assertTrue(out.startswith("x" * 100))
         self.assertIn("+900 chars truncated", out)
+
+
+class DiffChunkingTests(unittest.TestCase):
+    def test_large_single_file_is_split_without_losing_positions(self) -> None:
+        patch = "@@ -0,0 +1,18 @@\n" + "\n".join(
+            f"+line_{i}_{'x' * 20}" for i in range(1, 19)
+        )
+        files = [{"filename": "src/big.py", "patch": patch}]
+
+        chunks, skipped = _build_annotated_diff_chunks(files, max_chars=220, skip_paths=set())
+
+        self.assertEqual(skipped, [])
+        self.assertGreater(len(chunks), 1)
+        parsed = parse_patch("src/big.py", patch)
+        visible: set[tuple[str, int]] = set()
+        for chunk in chunks:
+            self.assertLessEqual(len(chunk.text), 220)
+            self.assertIn("--- a/src/big.py", chunk.text)
+            visible.update(chunk.visible_positions.get("src/big.py", set()))
+        self.assertEqual(visible, parsed.valid_positions)
+
+    def test_skip_paths_are_omitted_and_reported(self) -> None:
+        files = [
+            {"filename": "kept.py", "patch": "@@ -0,0 +1 @@\n+ok"},
+            {"filename": "skip.py", "patch": "@@ -0,0 +1 @@\n+nope"},
+        ]
+
+        chunks, skipped = _build_annotated_diff_chunks(
+            files, max_chars=500, skip_paths={"skip.py"}
+        )
+
+        self.assertEqual(skipped, ["skip.py"])
+        self.assertEqual(len(chunks), 1)
+        self.assertIn("kept.py", chunks[0].text)
+        self.assertNotIn("skip.py", chunks[0].text)
+
+
+class ChunkMergeTests(unittest.TestCase):
+    def test_merge_chunk_summaries_mentions_chunking(self) -> None:
+        out = _merge_chunk_summaries([(1, "first"), (2, "second")], 2)
+        self.assertIn("Review ran in 2 chunks", out)
+        self.assertIn("Chunk 1:\nfirst", out)
+        self.assertIn("Chunk 2:\nsecond", out)
+
+    def test_merge_chunk_event_escalates_request_changes(self) -> None:
+        self.assertEqual(
+            _merge_chunk_event(["COMMENT", "REQUEST_CHANGES", "APPROVE"], comments_count=1),
+            "REQUEST_CHANGES",
+        )
+
+    def test_merge_chunk_event_keeps_approve_only_when_clean(self) -> None:
+        self.assertEqual(
+            _merge_chunk_event(["APPROVE", "APPROVE"], comments_count=0),
+            "APPROVE",
+        )
+        self.assertEqual(
+            _merge_chunk_event(["APPROVE", "APPROVE"], comments_count=1),
+            "COMMENT",
+        )
 
 
 class SummarizeRejectedCommentsTests(unittest.TestCase):

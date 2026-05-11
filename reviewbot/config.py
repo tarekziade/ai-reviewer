@@ -63,6 +63,7 @@ class Config:
     # modes; required only when require_web=True.
     github_oauth_client_id: Optional[str] = None
     github_oauth_client_secret: Optional[str] = None
+    github_oauth_callback_url: Optional[str] = None
     web_session_secret: Optional[str] = None
     # Comma-separated lists. Either may be empty when DEV_NO_AUTH is on.
     web_allowed_users: tuple[str, ...] = ()
@@ -100,6 +101,7 @@ class Config:
 
         oauth_client_id = os.environ.get("GITHUB_OAUTH_CLIENT_ID") or None
         oauth_client_secret = os.environ.get("GITHUB_OAUTH_CLIENT_SECRET") or None
+        oauth_callback_url = os.environ.get("GITHUB_OAUTH_CALLBACK_URL") or None
         session_secret = os.environ.get("WEB_SESSION_SECRET") or None
         dev_no_auth = _bool_env("DEV_NO_AUTH", False)
         allowed_users = tuple(
@@ -171,6 +173,7 @@ class Config:
             tool_max_iterations=_int_env("TOOL_MAX_ITERATIONS", 15),
             github_oauth_client_id=oauth_client_id,
             github_oauth_client_secret=oauth_client_secret,
+            github_oauth_callback_url=oauth_callback_url,
             web_session_secret=session_secret,
             web_allowed_users=allowed_users,
             web_allowed_orgs=allowed_orgs,

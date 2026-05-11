@@ -396,7 +396,7 @@ def auth_login(request: Request) -> Response:
     state = secrets.token_urlsafe(24)
     sess = _load_session(request)
     sess["oauth_state"] = state
-    redirect_uri = str(request.url_for("auth_callback"))
+    redirect_uri = cfg.github_oauth_callback_url or str(request.url_for("auth_callback"))
     params = {
         "client_id": cfg.github_oauth_client_id or "",
         "redirect_uri": redirect_uri,
