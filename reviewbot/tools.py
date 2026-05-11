@@ -129,6 +129,17 @@ def _helper_subprocess_env() -> dict[str, str]:
     # leaking into helper subprocesses that shell out to git.
     env.setdefault("GIT_TERMINAL_PROMPT", "0")
     env.setdefault("GIT_CONFIG_NOSYSTEM", "1")
+    # Helpers installed via the pip-install hook land in the running
+    # interpreter's bin directory. Under systemd that directory is NOT
+    # on PATH (venvs are normally surfaced by `activate`, which we
+    # don't run). Prepend it so a freshly-installed `mlinter` is
+    # actually reachable by name from the helper subprocess.
+    venv_bin = os.path.dirname(sys.executable)
+    if venv_bin:
+        existing = env.get("PATH", "")
+        parts = existing.split(os.pathsep) if existing else []
+        if venv_bin not in parts:
+            env["PATH"] = venv_bin + (os.pathsep + existing if existing else "")
     return env
 
 
