@@ -1100,6 +1100,7 @@ def prepare_review(
             all_summaries,
             pr_title=pr.get("title") or "",
             max_tokens=cfg.llm_max_tokens,
+            reasoning_effort=cfg.llm_reasoning_effort,
             emit=_emit,
         )
         if synth_metrics is not None:
