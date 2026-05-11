@@ -150,11 +150,22 @@ class DiffChunkingTests(unittest.TestCase):
 
 
 class ChunkMergeTests(unittest.TestCase):
-    def test_merge_chunk_summaries_mentions_chunking(self) -> None:
+    def test_merge_chunk_summaries_does_not_mention_chunks(self) -> None:
+        # The fallback merge is what the published review falls back to
+        # when the synthesis LLM call is unavailable; it must NOT leak
+        # the chunking implementation detail to GitHub readers.
         out = _merge_chunk_summaries([(1, "first"), (2, "second")], 2)
-        self.assertIn("Review ran in 2 chunks", out)
-        self.assertIn("Chunk 1:\nfirst", out)
-        self.assertIn("Chunk 2:\nsecond", out)
+        self.assertNotIn("chunk", out.lower())
+        self.assertIn("first", out)
+        self.assertIn("second", out)
+
+    def test_merge_chunk_summaries_single_passes_through(self) -> None:
+        out = _merge_chunk_summaries([(1, "only summary")], 1)
+        self.assertEqual(out, "only summary")
+
+    def test_merge_chunk_summaries_skips_empty(self) -> None:
+        out = _merge_chunk_summaries([(1, "kept"), (2, "   ")], 2)
+        self.assertEqual(out, "kept")
 
     def test_merge_chunk_event_escalates_request_changes(self) -> None:
         self.assertEqual(

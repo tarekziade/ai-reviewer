@@ -456,21 +456,111 @@ def _build_runner_context(
 def _merge_chunk_summaries(
     summaries: list[tuple[int, str]], chunk_total: int
 ) -> str:
+    """Fallback merge used when the synthesis LLM call is unavailable or
+    fails. Joins per-chunk summaries with blank lines and never mentions
+    chunking — that is an internal implementation detail and would
+    confuse anyone reading the published review on GitHub."""
+    clean = [
+        summary.strip()
+        for _, summary in summaries
+        if isinstance(summary, str) and summary.strip()
+    ]
+    if not clean:
+        return ""
+    if len(clean) == 1:
+        return clean[0]
+    return "\n\n".join(clean)
+
+
+_SYNTHESIS_SYSTEM_PROMPT = """You are merging several partial code-review
+summaries into ONE coherent pull-request review.
+
+Inputs you receive:
+- The PR title (for grounding).
+- A numbered list of partial summaries; each was written after looking
+  at a different section of the same PR's diff.
+
+Your job: produce a single summary that reads as if one reviewer wrote
+it after seeing the whole PR. The output must:
+
+1. NEVER mention chunks, sections, parts, "the first summary", "the
+   second summary", or the merge process itself. Write as a peer
+   engineer leaving one review on the PR page.
+2. Be GitHub-flavored markdown. Open with a one-sentence verdict, then
+   group findings under a few `**bold**` or `##` headings
+   (Correctness, Security, Style, Tests, etc.) — skip headings with
+   nothing to say. Use bullet lists for individual points. Use
+   backticks for paths, function names, and short code references.
+3. Deduplicate overlapping observations. If two partials flagged the
+   same issue, mention it once.
+4. Preserve concrete file/function references from the partials.
+5. Stay tight — a few paragraphs or short bulleted sections, not a
+   wall of text.
+
+Output ONLY the markdown summary. No preamble, no JSON, no code fences
+around the whole thing.
+"""
+
+
+def _synthesize_merged_summary(
+    llm: ChatCompletionClient,
+    summaries: list[tuple[int, str]],
+    *,
+    pr_title: str,
+    max_tokens: int,
+    emit: Optional[Callable[[str, str], None]] = None,
+) -> tuple[Optional[str], Optional["_AggregateMetrics"]]:
+    """Run a small synthesis LLM call to merge per-chunk summaries into
+    a single PR-level review. Returns (text, metrics) on success or
+    (None, None) on any failure — the caller falls back to a plain join.
+
+    Tools are off here on purpose: we already have the per-chunk
+    findings in hand, the synthesis call only needs to rewrite them into
+    one cohesive markdown summary."""
     clean = [
         (idx, summary.strip())
         for idx, summary in summaries
         if isinstance(summary, str) and summary.strip()
     ]
-    if not clean:
-        return ""
-    if chunk_total <= 1 and len(clean) == 1:
-        return clean[0][1]
-    parts = [
-        f"Review ran in {chunk_total} chunks because the PR exceeded the per-call diff budget."
-    ]
+    if len(clean) < 2:
+        return None, None
+
+    parts = [f"PR title: {pr_title or '(no title)'}", "", "Partial summaries:"]
     for chunk_idx, summary in clean:
-        parts.append(f"Chunk {chunk_idx}:\n{summary}")
-    return "\n\n".join(parts)
+        parts.append(f"\n[{chunk_idx}]\n{summary}")
+    user_prompt = "\n".join(parts)
+
+    if emit:
+        emit("step", "llm")
+        emit("log", "Merging per-chunk summaries into one PR review…")
+
+    metrics = _AggregateMetrics()
+    chunk_cb = _wrap_chunk_cb(emit, metrics)
+    try:
+        chat = llm.complete(
+            [
+                {"role": "system", "content": _SYNTHESIS_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            max_tokens=max_tokens,
+            chunk_callback=chunk_cb,
+        )
+    except Exception as exc:  # noqa: BLE001
+        log.warning("synthesis merge failed: %s", exc)
+        return None, None
+
+    metrics.turns += 1
+    metrics.latency_seconds += chat.latency_seconds
+    if chat.prompt_tokens is not None:
+        metrics.prompt_tokens += chat.prompt_tokens
+    if chat.completion_tokens is not None:
+        metrics.completion_tokens += chat.completion_tokens
+    _emit_metrics(emit, metrics)
+
+    text = (chat.content or "").strip()
+    if not text:
+        return None, None
+    return text, metrics
 
 
 def _merge_chunk_event(events: list[str], comments_count: int) -> str:
@@ -960,10 +1050,31 @@ def prepare_review(
             c["_parsed"] = chunk.parsed_by_path.get(c["path"])
         all_valid.extend(valid)
 
+    # If the PR was reviewed in multiple chunks, the per-chunk summaries
+    # each describe their slice in isolation. Run one extra LLM call to
+    # rewrite them into a single PR-level review — otherwise the
+    # published summary would read as N disjoint notes referring to
+    # "chunk N", which leaks an implementation detail.
+    if len(diff_chunks) > 1 and sum(1 for _, s in all_summaries if s.strip()) > 1:
+        synth_text, synth_metrics = _synthesize_merged_summary(
+            llm,
+            all_summaries,
+            pr_title=pr.get("title") or "",
+            max_tokens=cfg.llm_max_tokens,
+            emit=_emit,
+        )
+        if synth_metrics is not None:
+            _merge_metrics(total_metrics, synth_metrics)
+        if synth_text:
+            summary = synth_text
+        else:
+            summary = _merge_chunk_summaries(all_summaries, len(diff_chunks))
+    else:
+        summary = _merge_chunk_summaries(all_summaries, len(diff_chunks))
+
     metrics_line = _format_aggregated_metrics(total_metrics)
     _emit("log", f"LLM done: {metrics_line}")
 
-    summary = _merge_chunk_summaries(all_summaries, len(diff_chunks))
     event = _merge_chunk_event(all_events, len(all_valid))
 
     draft_comments: list[DraftComment] = []
