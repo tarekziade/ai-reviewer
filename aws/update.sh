@@ -21,7 +21,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE_FILE="${SCRIPT_DIR}/.deploy-state.json"
 
-for cmd in aws jq ssh rsync base64; do
+for cmd in aws jq ssh rsync base64 openssl; do
   command -v "$cmd" >/dev/null || { echo "missing dependency: $cmd" >&2; exit 1; }
 done
 
@@ -116,6 +116,26 @@ if [[ -n "$PEM_LOCAL_FILE" && "$PEM_LOCAL_FILE" != "$PEM_REMOTE_FILE" ]]; then
   ' "$APP_ENV_LOCAL_FILE" > "$APP_ENV_STAGED_FILE"
 fi
 
+# Mirror deploy.sh: if WEB_SESSION_SECRET is still the placeholder, mint
+# one and persist it back to the local env so subsequent updates use the
+# same value (otherwise every redeploy would invalidate active sessions).
+WEB_SESSION_SECRET_VAL="$(read_env_value WEB_SESSION_SECRET "$APP_ENV_STAGED_FILE" || true)"
+if [[ -z "$WEB_SESSION_SECRET_VAL" || "$WEB_SESSION_SECRET_VAL" == "replace-me" ]]; then
+  GENERATED_SECRET="$(openssl rand -hex 32)"
+  echo "==> minting WEB_SESSION_SECRET (was empty/placeholder); writing it back to $APP_ENV_LOCAL_FILE"
+  for target in "$APP_ENV_STAGED_FILE" "$APP_ENV_LOCAL_FILE"; do
+    if grep -qE '^WEB_SESSION_SECRET=' "$target"; then
+      awk -v val="$GENERATED_SECRET" '
+        /^WEB_SESSION_SECRET=/ { print "WEB_SESSION_SECRET=" val; next }
+        { print }
+      ' "$target" > "${target}.tmp"
+      mv "${target}.tmp" "$target"
+    else
+      printf '\nWEB_SESSION_SECRET=%s\n' "$GENERATED_SECRET" >> "$target"
+    fi
+  done
+fi
+
 APP_ENV_B64="$(base64 < "$APP_ENV_STAGED_FILE" | tr -d '\n')"
 
 # ---- remote update ----------------------------------------------------------
@@ -157,16 +177,16 @@ echo "==> writing ${APP_ENV_REMOTE_FILE}"
 base64 -d <<'ENVFILE' | sudo tee "${APP_ENV_REMOTE_FILE}" > /dev/null
 ${APP_ENV_B64}
 ENVFILE
-sudo chown root:ec2-user "${APP_ENV_REMOTE_FILE}"
-sudo chmod 0640 "${APP_ENV_REMOTE_FILE}"
+sudo chown ec2-user:ec2-user "${APP_ENV_REMOTE_FILE}"
+sudo chmod 0600 "${APP_ENV_REMOTE_FILE}"
 
 if [[ -n "${PEM_B64}" ]]; then
   echo "==> writing ${PEM_REMOTE_FILE}"
   base64 -d <<'PEMFILE' | sudo tee "${PEM_REMOTE_FILE}" > /dev/null
 ${PEM_B64}
 PEMFILE
-  sudo chown root:ec2-user "${PEM_REMOTE_FILE}"
-  sudo chmod 0640 "${PEM_REMOTE_FILE}"
+  sudo chown ec2-user:ec2-user "${PEM_REMOTE_FILE}"
+  sudo chmod 0600 "${PEM_REMOTE_FILE}"
 fi
 
 echo "==> restarting ${SERVICE_NAME}"

@@ -51,3 +51,24 @@ changes included. If you'd rather ship only what's pushed, commit
 + check out the deployment branch before running.
 
 Destroy the stack with `./aws/destroy.sh`.
+
+## Security notes
+
+- The instance is launched without a public IP and listens on
+  `0.0.0.0:8080` plain HTTP. That's safe **only** while the box sits
+  inside a VPN / private network. If you ever expose it to the public
+  internet, terminate TLS in front of it (e.g. nginx + Let's Encrypt)
+  and flip `DEV_NO_AUTH` off — the session cookie's `Secure` flag is
+  tied to `DEV_NO_AUTH=1`, so plain HTTP works only in that mode.
+- `WEB_SESSION_SECRET` must be a real random value. `deploy.sh` and
+  `update.sh` mint one with `openssl rand -hex 32` if your env still has
+  the example placeholder, and write the value back to
+  `reviewbot-web.env` so subsequent updates reuse it.
+- The PEM and env files land on the host as `0600` owned by
+  `ec2-user` — only the service account can read the GitHub App private
+  key, LLM API key, OAuth client secret, and session secret.
+- `ALLOW_APPROVE` defaults to off. The web UI relies on this to refuse
+  publishing an LLM-chosen `APPROVE` event, because that event is
+  influenced by attacker-controlled PR content. Turn it on only after
+  deciding your operators will verify every APPROVE before clicking
+  publish.

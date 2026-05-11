@@ -33,7 +33,7 @@ SG_CREATED_BY_US=false
 KEY_CREATED_BY_US=false
 
 # ---- prereqs ----------------------------------------------------------------
-for cmd in aws jq base64; do
+for cmd in aws jq base64 openssl; do
   command -v "$cmd" >/dev/null || { echo "missing dependency: $cmd" >&2; exit 1; }
 done
 
@@ -100,6 +100,29 @@ if [[ -n "$PEM_LOCAL_FILE" ]]; then
     }
     { print }
   ' "$APP_ENV_LOCAL_FILE" > "$APP_ENV_STAGED_FILE"
+fi
+
+# WEB_SESSION_SECRET must be a real random value; the app refuses to
+# start with an empty / placeholder secret when DEV_NO_AUTH is off, and
+# we don't want a fresh deploy to depend on the operator remembering to
+# rotate it. If it's still the example placeholder, mint one and persist
+# it back to the local env file so re-runs of update.sh keep the same
+# value (otherwise sessions would invalidate on every redeploy).
+WEB_SESSION_SECRET_VAL="$(read_env_value WEB_SESSION_SECRET "$APP_ENV_STAGED_FILE" || true)"
+if [[ -z "$WEB_SESSION_SECRET_VAL" || "$WEB_SESSION_SECRET_VAL" == "replace-me" ]]; then
+  GENERATED_SECRET="$(openssl rand -hex 32)"
+  echo "==> minting WEB_SESSION_SECRET (was empty/placeholder); writing it back to $APP_ENV_LOCAL_FILE"
+  for target in "$APP_ENV_STAGED_FILE" "$APP_ENV_LOCAL_FILE"; do
+    if grep -qE '^WEB_SESSION_SECRET=' "$target"; then
+      awk -v val="$GENERATED_SECRET" '
+        /^WEB_SESSION_SECRET=/ { print "WEB_SESSION_SECRET=" val; next }
+        { print }
+      ' "$target" > "${target}.tmp"
+      mv "${target}.tmp" "$target"
+    else
+      printf '\nWEB_SESSION_SECRET=%s\n' "$GENERATED_SECRET" >> "$target"
+    fi
+  done
 fi
 
 APP_ENV_B64="$(base64 < "$APP_ENV_STAGED_FILE" | tr -d '\n')"
@@ -177,15 +200,20 @@ if [[ -n "${PEM_B64}" ]]; then
 cat <<'PEMFILE' | base64 -d > ${PEM_REMOTE_FILE}
 ${PEM_B64}
 PEMFILE
-chown root:ec2-user ${PEM_REMOTE_FILE}
-chmod 0640 ${PEM_REMOTE_FILE}
+# The service runs as ec2-user, so the PEM is owned by ec2-user and
+# mode 0600 — nobody else on the host (or in the group) can read the
+# GitHub App private key.
+chown ec2-user:ec2-user ${PEM_REMOTE_FILE}
+chmod 0600 ${PEM_REMOTE_FILE}
 fi
 
 cat <<'ENVFILE' | base64 -d > ${APP_ENV_REMOTE_FILE}
 ${APP_ENV_B64}
 ENVFILE
-chown root:ec2-user ${APP_ENV_REMOTE_FILE}
-chmod 0640 ${APP_ENV_REMOTE_FILE}
+# Env file also holds secrets (LLM API key, OAuth client secret, web
+# session secret). Lock it down to the service user.
+chown ec2-user:ec2-user ${APP_ENV_REMOTE_FILE}
+chmod 0600 ${APP_ENV_REMOTE_FILE}
 
 cat >/etc/systemd/system/${SERVICE_NAME}.service <<'UNIT'
 [Unit]
