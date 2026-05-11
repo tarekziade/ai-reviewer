@@ -60,11 +60,6 @@ class Config:
     llm_bill_to: Optional[str]
     llm_max_tokens: int
     llm_stream: bool
-    # Optional ``reasoning_effort`` passed through on /v1/chat/completions.
-    # Supported by some endpoints (OpenAI o-series, HF Router for the
-    # Kimi-K2 thinking variants, etc.). Common values: "low", "medium",
-    # "high". Leave empty to omit the parameter entirely.
-    llm_reasoning_effort: Optional[str]
 
     mention_trigger: str
     review_event: str
@@ -93,6 +88,11 @@ class Config:
     web_allowed_orgs: tuple[str, ...] = ()
     web_job_ttl_seconds: int = 3600
     web_dev_no_auth: bool = False
+    # Optional ``reasoning_effort`` passed through on /v1/chat/completions.
+    # Supported by some endpoints (OpenAI o-series, HF Router for the
+    # Kimi-K2 thinking variants, etc.). Common values: "low", "medium",
+    # "high". Leave empty to omit the parameter entirely.
+    llm_reasoning_effort: Optional[str] = None
 
     @classmethod
     def from_env(
