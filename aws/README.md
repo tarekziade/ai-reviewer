@@ -29,4 +29,22 @@ If you want the same no-auth behavior as your local command, keep
 `DEV_NO_AUTH=1` in `reviewbot-web.env`. On a shared or public host,
 remove that and configure `WEB_ALLOWED_USERS` or `WEB_ALLOWED_ORG`.
 
+## Updating an existing deployment
+
+`./aws/update.sh` refreshes an already-deployed box in place — no
+instance churn, no re-key, no downtime beyond a `systemctl restart`. It:
+
+- reads `.deploy-state.json` to find the instance + key
+- refreshes the cached private IP if AWS moved it
+- SSHes in and runs `git fetch && reset --hard origin/${REPO_BRANCH:-main}`
+  on `/opt/app/ai-reviewer`
+- `pip install -e '.[web]'` to pick up any new dependencies
+- rewrites `/etc/reviewbot/${SERVICE_NAME}.env` (and the PEM if your
+  `GITHUB_PRIVATE_KEY_PATH` still points at a local file)
+- `sudo systemctl restart` the service and prints its status
+
+Use it whenever you've pushed code to the deployment branch or edited
+`reviewbot-web.env` locally. `REPO_BRANCH=other-branch ./aws/update.sh`
+deploys a non-default branch.
+
 Destroy the stack with `./aws/destroy.sh`.
