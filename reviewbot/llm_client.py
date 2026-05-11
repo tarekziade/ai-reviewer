@@ -32,6 +32,12 @@ class ChatResult:
     latency_seconds: float = 0.0
     tool_calls: list[ToolCall] = field(default_factory=list)
     finish_reason: Optional[str] = None
+    # Number of chain-of-thought characters the model emitted during
+    # this turn (sum of `reasoning_content`/`reasoning`/`thinking`
+    # delta fields). Used by the agent loop to distinguish "thoughtful
+    # tool-using turn" from "blind tool chaining". 0 for non-reasoning
+    # models, which is fine — they're expected to emit content.
+    reasoning_chars: int = 0
 
     @property
     def prompt_tokens(self) -> Optional[int]:
@@ -270,7 +276,13 @@ class ChatCompletionClient:
                         raise _ToolsUnsupported(body_preview)
                 r.raise_for_status()
                 if self.stream:
-                    content, usage, tool_calls, finish_reason = self._consume_stream(
+                    (
+                        content,
+                        usage,
+                        tool_calls,
+                        finish_reason,
+                        reasoning_chars,
+                    ) = self._consume_stream(
                         r,
                         chunk_callback=chunk_callback,
                         est_input_tokens=est_input_tokens,
@@ -283,6 +295,12 @@ class ChatCompletionClient:
                     usage = data.get("usage") or {}
                     tool_calls = _parse_tool_calls_from_message(message.get("tool_calls"))
                     finish_reason = choice.get("finish_reason")
+                    # Non-streaming endpoints sometimes include
+                    # `reasoning_content` directly on the message. Best-
+                    # effort capture so the agent loop's "did the model
+                    # think this turn?" check works either way.
+                    reasoning_text = message.get("reasoning_content") or message.get("reasoning") or ""
+                    reasoning_chars = len(reasoning_text) if isinstance(reasoning_text, str) else 0
                     if chunk_callback is not None and content:
                         # Non-streaming path: still emit the full content
                         # in one piece so callers don't need a separate
@@ -327,6 +345,7 @@ class ChatCompletionClient:
                 latency_seconds=latency,
                 tool_calls=tool_calls,
                 finish_reason=finish_reason,
+                reasoning_chars=reasoning_chars,
             )
         raise RuntimeError("unreachable")  # loop always returns or raises
 
@@ -359,7 +378,7 @@ class ChatCompletionClient:
         *,
         chunk_callback: Optional[Callable[[str, str], None]] = None,
         est_input_tokens: int = 0,
-    ) -> tuple[str, dict[str, Any], list[ToolCall], Optional[str]]:
+    ) -> tuple[str, dict[str, Any], list[ToolCall], Optional[str], int]:
         """Parse an OpenAI-style SSE chat-completions stream.
 
         Each event is a `data: {json}` line; the terminal event is `data: [DONE]`.
@@ -546,7 +565,7 @@ class ChatCompletionClient:
             finish_reason,
             cls._format_field_counts(delta_field_chars),
         )
-        return "".join(parts), usage, tool_calls, finish_reason
+        return "".join(parts), usage, tool_calls, finish_reason, len(joined_reasoning)
 
     @staticmethod
     def _format_field_counts(counts: dict[str, int]) -> str:

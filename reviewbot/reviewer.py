@@ -607,16 +607,18 @@ def _run_agentic_loop(
     response_format = None if tools_arg else {"type": "json_object"}
 
     # ``tool_max_iterations <= 0`` means "no cap". When set, the cap
-    # applies to *content turns* — turns where the model produced text
-    # (a reasoning step or its final answer). Tool-only turns are pure
-    # investigation and don't burn the budget; an absolute ceiling on
-    # raw iterations still bounds infinite-tool-loop pathologies.
+    # counts only *blind* tool turns: the model emitted tool calls
+    # without any reasoning OR content. Productive turns — where the
+    # model either thought (reasoning_chars > 0), said something
+    # (content), or returned a final answer (no tool calls) — don't
+    # burn the budget. An absolute ceiling on raw iterations still
+    # bounds runaway tool-only chaining.
     iter_cap: Optional[int] = (
         cfg.tool_max_iterations if cfg.tool_max_iterations > 0 else None
     )
     ABSOLUTE_ITER_CEILING = 60
     iteration = 0
-    content_turns = 0
+    blind_tool_turns = 0
     while True:
         iteration += 1
         if iteration > ABSOLUTE_ITER_CEILING:
@@ -625,16 +627,20 @@ def _run_agentic_loop(
                 ABSOLUTE_ITER_CEILING,
             )
             break
-        if iter_cap is not None and content_turns >= iter_cap:
+        if iter_cap is not None and blind_tool_turns >= iter_cap:
             break
         if iter_cap is not None:
-            label = f"{content_turns + 1}/{iter_cap}"
+            label = f"{blind_tool_turns}/{iter_cap}"
         else:
             label = f"{iteration}"
-        log.info("Agent loop iteration %s (raw=%d)", label, iteration)
+        log.info(
+            "Agent loop iteration raw=%d blind_tool_turns=%s",
+            iteration,
+            label,
+        )
         if emit is not None:
             emit("step", f"llm:{label}")
-            emit("log", f"LLM turn {label}")
+            emit("log", f"LLM turn (blind={label})")
         chat = llm.complete(
             messages,
             response_format=response_format,
@@ -651,15 +657,20 @@ def _run_agentic_loop(
             metrics.completion_tokens += chat.completion_tokens
         _emit_metrics(emit, metrics)
 
-        # A turn only counts against the content-turn budget if the
-        # model actually produced text. Pure tool-call turns are
-        # investigation — they advance us toward the answer without
-        # consuming a "thinking" slot.
-        if (chat.content or "").strip():
-            content_turns += 1
-
         if not chat.tool_calls:
             return chat, metrics
+
+        # A "blind" tool turn is one where the model fired tool calls
+        # without reasoning or content — i.e. chaining tools without
+        # thinking between them. Those are the turns we want to limit;
+        # tool calls preceded by reasoning are healthy investigation.
+        thought = bool(chat.reasoning_chars) or bool((chat.content or "").strip())
+        if not thought:
+            blind_tool_turns += 1
+            log.info(
+                "Blind tool turn (no reasoning/content); blind_tool_turns=%d",
+                blind_tool_turns,
+            )
 
         if tool_env is None:
             # Model emitted tool calls even though we didn't pass tools —
@@ -707,9 +718,9 @@ def _run_agentic_loop(
     # used up its content-turn allowance, or when the absolute ceiling
     # tripped (runaway tool calling).
     log.warning(
-        "Agent budget exhausted (content_turns=%d, raw_iter=%d, cap=%d); "
+        "Agent budget exhausted (blind_tool_turns=%d, raw_iter=%d, cap=%d); "
         "asking model for a final review without tools",
-        content_turns,
+        blind_tool_turns,
         iteration,
         cfg.tool_max_iterations,
     )
