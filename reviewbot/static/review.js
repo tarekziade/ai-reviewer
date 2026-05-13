@@ -92,6 +92,13 @@
     statusEl.className = `status-badge ${s}`;
   }
 
+  // Count of LLM turns we've seen — the server's "llm:N/M" detail is
+  // the *blind* tool turn budget (turns where the model called tools
+  // without reasoning) which stays at 0 for productive reviews and so
+  // misleads the user into thinking nothing's happening. We tally real
+  // turns client-side from the step event stream.
+  let llmTurnCount = 0;
+
   function handleStep(raw) {
     // Values: "clone", "fetch", "context", "llm", "llm:N/M", "done", "error"
     if (raw === "error") {
@@ -117,9 +124,19 @@
       else if (i === idx) el.classList.add(name === "done" ? "done" : "active");
       else el.classList.add("pending");
     }
-    if (name === "llm" && detail) {
-      llmDetailEl.textContent = `· turn ${detail}`;
-    } else if (name !== "llm") {
+    if (name === "llm") {
+      llmTurnCount++;
+      // Detail (when present) is "blind/blind_cap" — only worth showing
+      // when blind > 0 (i.e. the model is burning the safety budget).
+      let suffix = "";
+      if (detail) {
+        const [blind] = detail.split("/");
+        if (blind && parseInt(blind, 10) > 0) {
+          suffix = ` (blind ${detail})`;
+        }
+      }
+      llmDetailEl.textContent = `· turn ${llmTurnCount}${suffix}`;
+    } else {
       // Leave the LLM detail if we've moved past it; clear if not yet there.
       if (idx < STEP_ORDER.indexOf("llm")) llmDetailEl.textContent = "";
     }
@@ -136,19 +153,49 @@
   // newline in that case.
   let consoleAtLineStart = true;
 
-  function appendConsole(kind, text) {
-    const span = document.createElement("span");
-    span.className = kind;
-    const streamed = kind === "token" || kind === "reasoning";
-    let prefix = streamed || consoleAtLineStart ? "" : "\n";
-    if (kind === "log") prefix += "› ";
-    else if (kind === "tool") prefix += "⚙ ";
-    else if (kind === "error") prefix += "✗ ";
-    const body = prefix + text + (streamed ? "" : "\n");
-    span.textContent = body;
-    consoleEl.appendChild(span);
+  // Pending events queued for the next animation frame. A long agentic
+  // loop emits 100+ events/sec; appending each to the DOM and scrolling
+  // synchronously froze the tab. Batching into one DocumentFragment per
+  // frame and keeping only the last CONSOLE_WINDOW spans (sliding tail)
+  // keeps the page responsive — the user only watches recent activity,
+  // not 10^5 tokens of history.
+  const CONSOLE_WINDOW = 800;
+  const consolePending = [];
+  let consoleFlushScheduled = false;
+
+  function flushConsole() {
+    consoleFlushScheduled = false;
+    if (consolePending.length === 0) return;
+    const frag = document.createDocumentFragment();
+    for (const { kind, text } of consolePending) {
+      const span = document.createElement("span");
+      span.className = kind;
+      const streamed = kind === "token" || kind === "reasoning";
+      let prefix = streamed || consoleAtLineStart ? "" : "\n";
+      if (kind === "log") prefix += "› ";
+      else if (kind === "tool") prefix += "⚙ ";
+      else if (kind === "error") prefix += "✗ ";
+      const body = prefix + text + (streamed ? "" : "\n");
+      span.textContent = body;
+      frag.appendChild(span);
+      consoleAtLineStart = body.endsWith("\n");
+    }
+    consolePending.length = 0;
+    consoleEl.appendChild(frag);
+    // Sliding-window trim: drop oldest spans so the DOM stays bounded.
+    while (consoleEl.childElementCount > CONSOLE_WINDOW) {
+      consoleEl.removeChild(consoleEl.firstChild);
+    }
+    // Single scroll-to-bottom per frame instead of one per event.
     consoleEl.scrollTop = consoleEl.scrollHeight;
-    consoleAtLineStart = body.endsWith("\n");
+  }
+
+  function appendConsole(kind, text) {
+    consolePending.push({ kind, text });
+    if (!consoleFlushScheduled) {
+      consoleFlushScheduled = true;
+      requestAnimationFrame(flushConsole);
+    }
   }
 
   async function loadInfo() {
