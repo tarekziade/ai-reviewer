@@ -86,7 +86,7 @@ class Config:
     # Comma-separated lists. Either may be empty when DEV_NO_AUTH is on.
     web_allowed_users: tuple[str, ...] = ()
     web_allowed_orgs: tuple[str, ...] = ()
-    web_job_ttl_seconds: int = 3600
+    web_job_ttl_seconds: int = 3600 * 4  # 4h
     web_dev_no_auth: bool = False
     # Optional ``reasoning_effort`` passed through on /v1/chat/completions.
     # Supported by some endpoints (OpenAI o-series, HF Router for the
@@ -177,19 +177,26 @@ class Config:
             # and reasoning display rely on incremental SSE chunks. Set
             # LLM_STREAM=0 to fall back to the buffered REST path.
             llm_stream=_bool_env("LLM_STREAM", True),
-            llm_reasoning_effort=(os.environ.get("LLM_REASONING_EFFORT") or "").strip() or None,
+            llm_reasoning_effort=(os.environ.get("LLM_REASONING_EFFORT") or "").strip()
+            or None,
             mention_trigger=os.environ.get("MENTION_TRIGGER", "@serge"),
             review_event=os.environ.get("REVIEW_EVENT", "COMMENT"),
             max_diff_chars=_int_env("MAX_DIFF_CHARS", 200000),
-            review_rules_path=os.environ.get("REVIEW_RULES_PATH", ".ai/review-rules.md"),
-            helper_tools_path=os.environ.get("HELPER_TOOLS_PATH", ".ai/review-tools.json"),
+            review_rules_path=os.environ.get(
+                "REVIEW_RULES_PATH", ".ai/review-rules.md"
+            ),
+            helper_tools_path=os.environ.get(
+                "HELPER_TOOLS_PATH", ".ai/review-tools.json"
+            ),
             default_review_rules=os.environ.get(
                 "DEFAULT_REVIEW_RULES",
                 "Apply general Python correctness and security standards.",
             ),
             allow_approve=_bool_env("ALLOW_APPROVE", False),
             persona_header=os.environ.get("PERSONA_HEADER", "🤗 **Serge** says:"),
-            context_script_path=os.environ.get("CONTEXT_SCRIPT_PATH", ".ai/context-script"),
+            context_script_path=os.environ.get(
+                "CONTEXT_SCRIPT_PATH", ".ai/context-script"
+            ),
             context_script_timeout=_int_env("CONTEXT_SCRIPT_TIMEOUT", 30),
             repo_checkout_path=(os.environ.get("REPO_CHECKOUT_PATH") or "").strip(),
             # Set TOOL_MAX_ITERATIONS=0 to disable the cap entirely;
@@ -205,6 +212,6 @@ class Config:
             web_session_secret=session_secret,
             web_allowed_users=allowed_users,
             web_allowed_orgs=allowed_orgs,
-            web_job_ttl_seconds=_int_env("WEB_JOB_TTL_SECONDS", 3600),
+            web_job_ttl_seconds=_int_env("WEB_JOB_TTL_SECONDS", 3600 * 4),
             web_dev_no_auth=dev_no_auth,
         )

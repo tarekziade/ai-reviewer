@@ -203,7 +203,7 @@
     if (r.status === 404) {
       showError(
         "This review job is no longer in the server's memory — it was either " +
-        "garbage-collected (1h TTL) or the server has restarted since you " +
+        "garbage-collected (4h TTL) or the server has restarted since you " +
         "started it. Start a new review."
       );
       return null;
