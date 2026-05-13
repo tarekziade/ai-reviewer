@@ -491,14 +491,15 @@
     if (info.status === "running") {
       attachStream();
     } else {
-      // Refresh of an already-finished job. Render the form straight
-      // away so the page isn't blank while the stream replay catches
-      // up. Then attach the stream so the console still gets the
-      // transcript.
+      // Refresh of an already-finished job: render the draft form, but
+      // skip the stream attach. The console history can be very large
+      // for big PRs (10^5 token chunks) and replaying it on every reload
+      // freezes the tab. The details pane stays collapsed by default;
+      // if we later want a transcript view, we'll wire it to open the
+      // stream lazily on user click.
       await loadDraft();
       const details = document.getElementById("stream-details");
       if (details) details.open = false;
-      attachStream();
     }
   })();
 })();

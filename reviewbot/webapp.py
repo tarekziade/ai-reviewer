@@ -177,6 +177,10 @@ class Job:
     # opened the EventSource.
     history: list[dict[str, Any]] = field(default_factory=list)
     history_lock: threading.Lock = field(default_factory=threading.Lock)
+    # Running tally of "noisy" (token/reasoning) entries currently in
+    # history. Lets _push_event do bounded-FIFO eviction in O(1) average
+    # instead of scanning the full history on every streaming chunk.
+    noisy_history_count: int = 0
 
 
 _jobs: dict[str, Job] = {}
@@ -195,6 +199,17 @@ def _gc_jobs() -> None:
         log.info("Garbage-collected %d expired job(s)", len(stale))
 
 
+# Per-kind cap on the replay buffer. "token" and "reasoning" are emitted
+# once per LLM streaming chunk and can easily reach 10^5 entries on a
+# huge PR (e.g. transformers#44794), which then drowns the SSE replay and
+# freezes the page on reload. Structural events ("log", "step", "tool",
+# "error", "metrics", "done") are inherently bounded by the agentic loop
+# turn count, so they stay unbounded. The cap is FIFO — newer chunks
+# evict older ones, since the tail is more relevant on reload.
+_NOISY_KINDS = frozenset({"token", "reasoning"})
+_NOISY_HISTORY_CAP = 2000
+
+
 def _push_event(job: Job, kind: str, text: str) -> None:
     """Thread-safe push from the worker thread into the job's queue.
     Also appends to the replay buffer so late SSE subscribers get the
@@ -202,6 +217,14 @@ def _push_event(job: Job, kind: str, text: str) -> None:
     event = {"kind": kind, "text": text, "ts": time.time()}
     with job.history_lock:
         job.history.append(event)
+        if kind in _NOISY_KINDS:
+            job.noisy_history_count += 1
+            if job.noisy_history_count > _NOISY_HISTORY_CAP:
+                for i, e in enumerate(job.history):
+                    if e["kind"] in _NOISY_KINDS:
+                        del job.history[i]
+                        job.noisy_history_count -= 1
+                        break
     if job.loop is not None:
         job.loop.call_soon_threadsafe(job.queue.put_nowait, event)
 
@@ -819,13 +842,22 @@ async def review_stream(
 
     async def generator():
         # Replay history first so reloads / late subscribers see the full
-        # transcript.
+        # transcript. For finished jobs we strip token/reasoning chunks:
+        # the worker may have emitted 10^5 of them on a huge PR (see
+        # _NOISY_HISTORY_CAP) and replaying them on every reload freezes
+        # the page. The draft is what matters once the job is done; the
+        # remaining structural events still show clone/fetch/llm/tool
+        # progress so the console isn't blank.
+        finished = job.status in ("done", "error", "discarded", "published")
         with job.history_lock:
-            replay = list(job.history)
+            if finished:
+                replay = [e for e in job.history if e["kind"] not in _NOISY_KINDS]
+            else:
+                replay = list(job.history)
         for event in replay:
             yield _sse_format(event)
         # If the job already finished while we were replaying, stop here.
-        if job.status in ("done", "error", "discarded", "published"):
+        if finished:
             # Make sure the final "done" event is included.
             if not any(e.get("kind") == "done" for e in replay):
                 yield _sse_format({"kind": "done", "text": ""})
