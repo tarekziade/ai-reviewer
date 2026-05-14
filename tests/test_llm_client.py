@@ -4,7 +4,7 @@ from unittest.mock import Mock, patch
 
 import requests
 
-from reviewbot.llm_client import ChatCompletionClient
+from reviewbot.llm_client import ChatCompletionClient, LLMResponseError
 
 
 def _interrupted_iter_lines(prefix_lines: list[str], exc: Exception):
@@ -157,6 +157,50 @@ class ChatCompletionClientTests(unittest.TestCase):
 
         self.assertEqual(result.content, "ok")
         self.assertEqual(mock_post.call_count, 2)
+
+    def test_complete_retries_on_429_then_succeeds(self) -> None:
+        rate_limited = Mock(
+            status_code=429,
+            ok=False,
+            reason="Too Many Requests",
+            text="rate limit",
+            headers={"Retry-After": "1"},
+        )
+        ok = Mock(
+            status_code=200,
+            json=Mock(return_value={"choices": [{"message": {"content": "ok"}}]}),
+            raise_for_status=Mock(),
+        )
+        with patch("reviewbot.llm_client.time.sleep") as mock_sleep, patch(
+            "reviewbot.llm_client.requests.post", side_effect=[rate_limited, ok]
+        ) as mock_post:
+            client = ChatCompletionClient("https://example.com/v1", "token", "fixed-model")
+            result = client.complete([{"role": "user", "content": "hi"}])
+
+        self.assertEqual(result.content, "ok")
+        self.assertEqual(mock_post.call_count, 2)
+        # Honored the Retry-After: 1 header, capped to the per-wait ceiling.
+        mock_sleep.assert_called_once_with(1.0)
+
+    def test_complete_raises_llmresponseerror_with_status_and_body_after_4xx(self) -> None:
+        bad = Mock(
+            status_code=400,
+            ok=False,
+            reason="Bad Request",
+            text='{"error":{"message":"response_format.type bad"}}',
+            headers={},
+        )
+        with patch("reviewbot.llm_client.requests.post", return_value=bad):
+            client = ChatCompletionClient("https://example.com/v1", "token", "fixed-model")
+            with self.assertRaises(LLMResponseError) as ctx:
+                client.complete([{"role": "user", "content": "hi"}])
+
+        exc = ctx.exception
+        self.assertEqual(exc.status_code, 400)
+        self.assertEqual(exc.reason, "Bad Request")
+        self.assertIn("response_format.type bad", exc.body_preview)
+        # Also a real requests.HTTPError so existing handlers still catch it.
+        self.assertIsInstance(exc, requests.HTTPError)
 
     def test_complete_consumes_sse_stream_when_streaming_enabled(self) -> None:
         sse_lines = [

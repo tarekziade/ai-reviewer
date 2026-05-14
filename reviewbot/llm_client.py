@@ -15,6 +15,22 @@ class _ToolsUnsupported(Exception):
     response body preview for logging."""
 
 
+class LLMResponseError(requests.HTTPError):
+    """Non-OK HTTP response from the chat-completions endpoint that
+    exhausted retries (or wasn't retryable to begin with). Carries the
+    status code, upstream reason phrase, and a short preview of the
+    response body so the web UI / action log can show *why* the request
+    failed without re-fetching it.
+    """
+
+    def __init__(self, status_code: int, reason: str, url: str, body_preview: str):
+        self.status_code = status_code
+        self.reason = reason
+        self.url = url
+        self.body_preview = body_preview
+        super().__init__(f"{status_code} {reason} for {url}: {body_preview}")
+
+
 @dataclass
 class ToolCall:
     """One tool/function call emitted by the assistant. ``arguments`` is
@@ -196,6 +212,35 @@ class ChatCompletionClient:
                 est_input_tokens=est_input_tokens,
             )
 
+    # Cap any single retry wait, even if the server hands us a huge
+    # Retry-After. 120s is plenty for dynamic-rate-limit recovery
+    # without letting a misbehaving upstream pin a worker forever.
+    _RETRY_WAIT_CEILING_SECONDS = 120.0
+
+    @staticmethod
+    def _retry_delay(attempt: int, response: "requests.Response") -> float:
+        """Compute how long to sleep before retrying. Honors ``Retry-After``
+        (seconds or HTTP-date form) when the server provides one; otherwise
+        falls back to exponential backoff (2,4,8,...)."""
+        ra = response.headers.get("Retry-After")
+        # Guard against non-string values (e.g. Mock objects in tests).
+        # Real ``requests.Response`` only ever returns ``str | None`` here.
+        if isinstance(ra, str) and ra:
+            try:
+                return min(float(ra), ChatCompletionClient._RETRY_WAIT_CEILING_SECONDS)
+            except ValueError:
+                # HTTP-date form (rare on LLM endpoints) — parse it.
+                try:
+                    from email.utils import parsedate_to_datetime
+
+                    target = parsedate_to_datetime(ra)
+                    secs = (target.timestamp() - time.time())
+                    if secs > 0:
+                        return min(secs, ChatCompletionClient._RETRY_WAIT_CEILING_SECONDS)
+                except Exception:  # noqa: BLE001
+                    pass
+        return float(2**attempt)
+
     @staticmethod
     def _estimate_input_tokens(
         messages: list[dict[str, Any]], tools: Optional[list[dict[str, Any]]]
@@ -246,14 +291,23 @@ class ChatCompletionClient:
                     timeout=300,
                     stream=self.stream,
                 )
-                if r.status_code >= 500 and attempt < attempts:
+                # 429 (rate limit) and 5xx are retryable. 429 in particular
+                # gets hit during agentic tool loops on providers with
+                # bursty-traffic dynamic limits (e.g. Together.ai via HF
+                # Router, where a few quick tool turns can exceed a 1 RPM
+                # cap). Honor Retry-After when the server provides it.
+                if (
+                    r.status_code == 429 or r.status_code >= 500
+                ) and attempt < attempts:
+                    delay = self._retry_delay(attempt, r)
                     log.warning(
-                        "LLM call attempt %d/%d returned %d; retrying",
+                        "LLM call attempt %d/%d returned %d; retrying in %.1fs",
                         attempt,
                         attempts,
                         r.status_code,
+                        delay,
                     )
-                    time.sleep(2**attempt)
+                    time.sleep(delay)
                     continue
                 if not r.ok:
                     # Surface the upstream error body so the action log
@@ -274,7 +328,9 @@ class ChatCompletionClient:
                             "not support function-calling for this model)"
                         )
                         raise _ToolsUnsupported(body_preview)
-                r.raise_for_status()
+                    raise LLMResponseError(
+                        r.status_code, r.reason or "", url, body_preview
+                    )
                 if self.stream:
                     (
                         content,

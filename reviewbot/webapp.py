@@ -42,6 +42,7 @@ from .github_auth import (
     installation_token,
 )
 from .github_client import GitHubClient
+from .llm_client import LLMResponseError
 from .reviewer import (
     DraftComment,
     ReviewDraft,
@@ -415,6 +416,34 @@ def _run_review_worker(job: Job) -> None:
         )
         job.status = "error"
         job.error = str(exc)
+        _push_event(job, "step", "error")
+        _push_event(job, "error", job.error)
+        _push_event(job, "done", "")
+    except LLMResponseError as exc:
+        # Upstream chat-completions endpoint returned a non-OK status
+        # (and either wasn't retryable, or retries didn't recover).
+        # Surface the status code + a body excerpt directly to the SSE
+        # client — without it the UI just shows "review crashed (see
+        # server log)" and the user has to SSH into the box to figure
+        # out whether it was a 429 (rate limit), a 400 (bad schema),
+        # auth, etc. The body comes from the LLM provider's own error
+        # response — no auth tokens of ours are echoed there.
+        log.warning(
+            "LLM endpoint returned %d for job %s: %s",
+            exc.status_code,
+            job.id,
+            exc.body_preview[:400],
+        )
+        job.status = "error"
+        excerpt = exc.body_preview.strip()
+        if len(excerpt) > 600:
+            excerpt = excerpt[:600] + "…"
+        reason_part = f" {exc.reason}" if exc.reason else ""
+        job.error = (
+            f"LLM endpoint returned {exc.status_code}{reason_part}: {excerpt}"
+            if excerpt
+            else f"LLM endpoint returned {exc.status_code}{reason_part}"
+        )
         _push_event(job, "step", "error")
         _push_event(job, "error", job.error)
         _push_event(job, "done", "")
