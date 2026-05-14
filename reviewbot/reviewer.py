@@ -600,13 +600,13 @@ def _run_agentic_loop(
     # regular "metrics" event the UI already consumes.
     chunk_cb: Optional[Callable[[str, str], None]] = _wrap_chunk_cb(emit, metrics)
 
-    # Several inference stacks (Kimi-K2 on HF Router, vLLM with some
-    # tool parsers, etc.) reject `response_format` + `tools` in the same
-    # request. We omit response_format whenever tools are in play and
-    # rely on the system prompt's "output ONLY a single JSON object"
-    # instruction plus _extract_json's forgiving parsing for the final
-    # answer.
-    response_format = None if tools_arg else {"type": "json_object"}
+    # We never pass `response_format` here. Several inference stacks
+    # reject it alongside tools (Kimi-K2 on HF Router, vLLM with some
+    # tool parsers) and Anthropic's OpenAI shim rejects
+    # `{"type": "json_object"}` outright (only `"json_schema"` is
+    # accepted). The system prompt's "output ONLY a single JSON object"
+    # instruction plus _extract_json's forgiving parsing handle the
+    # final answer just as well across every provider we target.
 
     # ``tool_max_iterations <= 0`` means "no cap". When set, the cap
     # counts only *blind* tool turns: the model emitted tool calls
@@ -649,7 +649,6 @@ def _run_agentic_loop(
             emit("log", f"LLM turn (blind={label})")
         chat = llm.complete(
             messages,
-            response_format=response_format,
             max_tokens=cfg.llm_max_tokens,
             tools=tools_arg,
             tool_choice="auto" if tools_arg else None,
@@ -743,7 +742,6 @@ def _run_agentic_loop(
     })
     chat = llm.complete(
         messages,
-        response_format={"type": "json_object"},
         max_tokens=cfg.llm_max_tokens,
         chunk_callback=chunk_cb,
         extra={"reasoning_effort": cfg.llm_reasoning_effort} if cfg.llm_reasoning_effort else None,
