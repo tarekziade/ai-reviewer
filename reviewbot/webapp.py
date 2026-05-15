@@ -52,6 +52,7 @@ from .reviewer import (
     prepare_review,
     publish_review,
 )
+from .store import JobStore, decode_draft
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
@@ -187,17 +188,25 @@ class Job:
 _jobs: dict[str, Job] = {}
 _jobs_lock = threading.Lock()
 
+# Persistent backing store. The in-memory `_jobs` dict is still used as
+# a hot cache for live SSE streams (asyncio.Queue, event loop reference)
+# — only running jobs strictly need to live here, but we keep finished
+# jobs around too until process restart since the bound is tiny.
+_store = JobStore(cfg.web_store_path)
+_crashed = _store.mark_running_as_crashed()
+if _crashed:
+    log.warning(
+        "Marked %d job(s) left in 'running' state as crashed (server restart)",
+        _crashed,
+    )
 
-def _gc_jobs() -> None:
-    """Best-effort cleanup of jobs older than the configured TTL. Called
-    on each new submission so we don't need a background sweeper."""
-    cutoff = time.time() - cfg.web_job_ttl_seconds
-    with _jobs_lock:
-        stale = [j_id for j_id, j in _jobs.items() if j.created_at < cutoff]
-        for j_id in stale:
-            del _jobs[j_id]
-    if stale:
-        log.info("Garbage-collected %d expired job(s)", len(stale))
+
+def _prune_store() -> None:
+    """Keep only the most recent ``web_job_retention`` jobs globally.
+    Called on each new submission so we don't need a background sweeper."""
+    pruned = _store.prune(cfg.web_job_retention)
+    if pruned:
+        log.info("Pruned %d old job(s) (retention=%d)", pruned, cfg.web_job_retention)
 
 
 # Per-kind cap on the replay buffer. "token" and "reasoning" are emitted
@@ -319,6 +328,23 @@ def _clone_pr_head(
         )
         shutil.rmtree(tmpdir, ignore_errors=True)
         return None
+
+
+def _persist_terminal(job: Job) -> None:
+    """Snapshot a finished job into the store so it survives a restart."""
+    with job.history_lock:
+        history_copy = list(job.history)
+    try:
+        _store.save_terminal(
+            job.id,
+            status=job.status,
+            error=job.error,
+            raw_llm_output=job.raw_llm_output,
+            draft=job.draft,
+            history=history_copy,
+        )
+    except Exception:  # noqa: BLE001
+        log.exception("failed to persist terminal state for job %s", job.id)
 
 
 def _run_review_worker(job: Job) -> None:
@@ -461,6 +487,10 @@ def _run_review_worker(job: Job) -> None:
     finally:
         if clone_path:
             shutil.rmtree(clone_path, ignore_errors=True)
+        # Snapshot the final state into SQLite. Every terminal branch
+        # above sets job.status to a non-'running' value, so this also
+        # clears the 'running' marker we'd otherwise reap on next restart.
+        _persist_terminal(job)
 
 
 def _bool_env_safe(name: str, default: bool) -> bool:
@@ -667,30 +697,30 @@ def auth_logout(request: Request) -> Response:
 
 @app.get("/reviews")
 def list_reviews(request: Request) -> JSONResponse:
-    """All jobs the current user has submitted that are still resident
-    in the in-memory registry (anything not yet GC'd by TTL — running,
-    done, published, discarded, errored)."""
+    """All persisted jobs the current user has submitted, newest first.
+    Reads from the SQLite store so reviews survive process restarts —
+    capped globally by ``web_job_retention``. For an in-flight job the
+    DB row still says 'running'; we cross-reference the live registry so
+    a process restart immediately reflects as 'error' even before the
+    startup sweeper has run (it should already have, but belt-and-braces)."""
     user = _require_user(request)
-    _gc_jobs()
-    with _jobs_lock:
-        my_jobs = [j for j in _jobs.values() if j.user == user]
-    my_jobs.sort(key=lambda j: j.created_at, reverse=True)
+    rows = _store.list_for_user(user, limit=cfg.web_job_retention)
     return JSONResponse(
         {
             "jobs": [
                 {
-                    "id": j.id,
-                    "owner": j.target_owner,
-                    "repo": j.target_repo,
-                    "number": j.target_number,
-                    "status": j.status,
-                    "created_at": j.created_at,
+                    "id": r["id"],
+                    "owner": r["target_owner"],
+                    "repo": r["target_repo"],
+                    "number": r["target_number"],
+                    "status": r["status"],
+                    "created_at": r["created_at"],
                     "url": (
-                        f"/reviews/{j.target_owner}/{j.target_repo}/"
-                        f"{j.target_number}/{j.id}"
+                        f"/reviews/{r['target_owner']}/{r['target_repo']}/"
+                        f"{r['target_number']}/{r['id']}"
                     ),
                 }
-                for j in my_jobs
+                for r in rows
             ]
         }
     )
@@ -711,7 +741,6 @@ async def submit_review(request: Request) -> JSONResponse:
     if len(trigger_comment) > _MAX_TRIGGER_COMMENT_CHARS:
         raise HTTPException(status_code=413, detail="comment_too_long")
     owner, repo, number = _parse_pr_ref(pr_ref)
-    _gc_jobs()
 
     job = Job(
         id=uuid.uuid4().hex,
@@ -725,6 +754,17 @@ async def submit_review(request: Request) -> JSONResponse:
     job.loop = asyncio.get_running_loop()
     with _jobs_lock:
         _jobs[job.id] = job
+    _store.insert_job(
+        id=job.id,
+        user=job.user,
+        target_owner=job.target_owner,
+        target_repo=job.target_repo,
+        target_number=job.target_number,
+        trigger_comment=job.trigger_comment,
+        created_at=job.created_at,
+        status=job.status,
+    )
+    _prune_store()
     threading.Thread(
         target=_run_review_worker, args=(job,), name=f"job-{job.id}", daemon=True
     ).start()
@@ -788,10 +828,16 @@ def _get_owned_job(
     """Resolve a job by its full {owner}/{repo}/{number}/{id} URL. Ensures
     the path identifiers match the job's actual target so users can't
     poke at someone else's job by guessing IDs, and so stale links
-    fail-fast instead of silently serving the wrong PR's data."""
+    fail-fast instead of silently serving the wrong PR's data.
+
+    Prefers the live in-memory entry (which carries the SSE queue + replay
+    history for running streams). Falls back to the SQLite store so
+    finished jobs survive a process restart."""
     user = _require_user(request)
     with _jobs_lock:
         job = _jobs.get(job_id)
+    if job is None:
+        job = _load_job_from_store(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="job_not_found")
     if job.user != user:
@@ -802,6 +848,30 @@ def _get_owned_job(
         or job.target_number != number
     ):
         raise HTTPException(status_code=404, detail="job_target_mismatch")
+    return job
+
+
+def _load_job_from_store(job_id: str) -> Optional[Job]:
+    """Reconstruct a finished Job from the SQLite row. The live-only
+    fields (queue, loop) stay at their defaults — the SSE generator
+    handles the "no live tail" case by replaying history and stopping."""
+    row = _store.load(job_id)
+    if row is None:
+        return None
+    job = Job(
+        id=row["id"],
+        user=row["user"],
+        target_owner=row["target_owner"],
+        target_repo=row["target_repo"],
+        target_number=row["target_number"],
+        trigger_comment=row["trigger_comment"],
+        created_at=row["created_at"],
+        status=row["status"],
+        error=row["error"],
+        raw_llm_output=row["raw_llm_output"],
+        draft=decode_draft(row["draft_json"]) if row.get("draft_json") else None,
+    )
+    job.history = list(row.get("history") or [])
     return job
 
 
@@ -955,6 +1025,7 @@ async def publish(
     gh = GitHubClient(token)
     publish_review(cfg, gh, job.draft, edits=edits)
     job.status = "published"
+    _store.update_status(job.id, "published")
     return JSONResponse({"status": "published"})
 
 
@@ -996,10 +1067,15 @@ def _edits_from_payload(payload: dict[str, Any], draft: ReviewDraft) -> ReviewEd
 def discard(
     request: Request, owner: str, repo: str, number: int, job_id: str
 ) -> JSONResponse:
+    """Discard a draft entirely — removes it from both the in-memory
+    registry and the SQLite store. Refusing a draft shouldn't clutter
+    the user's history with dead rows; if they want a record, they
+    should publish instead."""
     _require_same_origin(request)
     job = _get_owned_job(request, owner, repo, number, job_id)
-    job.status = "discarded"
-    job.draft = None
+    with _jobs_lock:
+        _jobs.pop(job.id, None)
+    _store.delete(job.id)
     return JSONResponse({"status": "discarded"})
 
 

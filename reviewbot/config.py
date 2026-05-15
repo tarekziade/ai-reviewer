@@ -86,7 +86,13 @@ class Config:
     # Comma-separated lists. Either may be empty when DEV_NO_AUTH is on.
     web_allowed_users: tuple[str, ...] = ()
     web_allowed_orgs: tuple[str, ...] = ()
-    web_job_ttl_seconds: int = 3600 * 4  # 4h
+    # SQLite file used by the web app to persist job metadata, drafts,
+    # and structural event history. Default is relative to CWD so dev
+    # works out of the box; deploy sets an absolute path.
+    web_store_path: str = "jobs.db"
+    # Global cap on persisted jobs. Older finished jobs are pruned;
+    # running jobs are never pruned.
+    web_job_retention: int = 25
     web_dev_no_auth: bool = False
     # Optional ``reasoning_effort`` passed through on /v1/chat/completions.
     # Supported by some endpoints (OpenAI o-series, HF Router for the
@@ -212,6 +218,8 @@ class Config:
             web_session_secret=session_secret,
             web_allowed_users=allowed_users,
             web_allowed_orgs=allowed_orgs,
-            web_job_ttl_seconds=_int_env("WEB_JOB_TTL_SECONDS", 3600 * 4),
+            web_store_path=(os.environ.get("WEB_STORE_PATH") or "jobs.db").strip()
+            or "jobs.db",
+            web_job_retention=_int_env("WEB_JOB_RETENTION", 25),
             web_dev_no_auth=dev_no_auth,
         )

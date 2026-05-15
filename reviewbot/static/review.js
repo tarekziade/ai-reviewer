@@ -445,16 +445,16 @@
   });
 
   discardBtn.addEventListener("click", async () => {
-    if (!confirm("Discard the entire draft? Nothing will be posted to GitHub.")) return;
+    if (!confirm("Discard the entire draft? Nothing will be posted to GitHub, and the review will be removed from your history.")) return;
     publishBtn.disabled = true;
     discardBtn.disabled = true;
     try {
       const r = await fetch(`${apiBase}/discard`, { method: "POST" });
       if (!r.ok) throw new Error(`${r.status}`);
       clearStoredEdits();
-      setStatus("discarded");
-      editSection.style.display = "none";
-      appendConsole("log", "Draft discarded.");
+      // The row is gone from the store — bounce back to the index so a
+      // reload doesn't hit a 404 looking for the now-deleted job.
+      window.location.href = "/";
     } catch (err) {
       showError(`Discard failed — ${err.message}`);
       publishBtn.disabled = false;
